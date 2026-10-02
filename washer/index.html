@@ -1,0 +1,2716 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front-Load Washer Simulator</title>
+<meta name="description" content="Physically simulated 27-inch, 4.5 cu ft front-load washer modelled on the WM4000H*A service and owner's manual data.">
+<style>
+:root{
+  --surface-1:#1a1a19; --surface-2:#242422; --surface-3:#2e2e2b;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#8d8c84;
+  --line:#3a3a37; --accent:#3987e5; --good:#3bb273; --warn:#e8a33d; --bad:#e5484d;
+  --series-1:#3987e5;
+  --panel-bg:rgba(26,26,25,.90);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#d9d6d0;font:13px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--text-primary)}
+#app{position:fixed;inset:0}
+canvas#gl{display:block;width:100%;height:100%;touch-action:none}
+.hud{position:fixed;background:var(--panel-bg);border:1px solid var(--line);border-radius:10px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:0 6px 24px rgba(0,0,0,.25)}
+#topbar{top:10px;left:50%;transform:translateX(-50%);padding:6px 12px;display:flex;gap:10px;align-items:center;white-space:nowrap;max-width:calc(100vw - 20px);overflow-x:auto}
+#topbar b{font-weight:600}
+#topbar .sub{color:var(--text-secondary);font-size:12px}
+.btn{appearance:none;border:1px solid var(--line);background:var(--surface-3);color:var(--text-primary);border-radius:7px;padding:5px 9px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:#5a5a55}
+.btn.on{background:var(--accent);border-color:var(--accent)}
+.btn.warnb{border-color:var(--warn)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.side{top:58px;bottom:10px;width:300px;overflow-y:auto;padding:10px 12px;scrollbar-width:thin}
+#left{left:10px}
+#right{right:10px}
+.side.collapsed{bottom:auto;overflow:hidden}
+.side.collapsed .body{display:none}
+.side h2{font-size:13px;margin:0;display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none}
+.side h3{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin:14px 0 6px;font-weight:600}
+.kv{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-variant-numeric:tabular-nums}
+.kv span:nth-child(odd){color:var(--text-secondary);white-space:nowrap}
+.kv span:nth-child(even){text-align:right}
+.row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
+.ctl{display:grid;grid-template-columns:110px 1fr 46px;align-items:center;gap:6px;margin:4px 0;color:var(--text-secondary)}
+.ctl input[type=range]{width:100%;accent-color:var(--accent)}
+.ctl output{text-align:right;color:var(--text-primary);font-variant-numeric:tabular-nums}
+label.chk{display:flex;gap:6px;align-items:center;color:var(--text-secondary);margin:3px 0;cursor:pointer}
+label.chk input{accent-color:var(--accent)}
+.pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line);color:var(--text-secondary)}
+.pill.on{color:#fff;border-color:var(--good);background:rgba(59,178,115,.25)}
+.pill.err{color:#fff;border-color:var(--bad);background:rgba(229,72,77,.3)}
+.chart{margin:4px 0 8px}
+.chart .ttl{display:flex;justify-content:space-between;color:var(--text-secondary);font-size:11px}
+.chart .ttl b{color:var(--text-primary);font-weight:600;font-variant-numeric:tabular-nums}
+.chart canvas{width:100%;height:54px;display:block;background:var(--surface-2);border-radius:6px;cursor:crosshair}
+.gl{font-size:12px}
+.gl .g{display:grid;grid-template-columns:12px 1fr auto;gap:6px;align-items:center;padding:2px 0;border-bottom:1px solid #2c2c29}
+.gl .sw{width:12px;height:12px;border-radius:3px}
+.gl .meta{color:var(--text-muted);font-variant-numeric:tabular-nums;font-size:11px}
+#bottombar{left:50%;bottom:10px;transform:translateX(-50%);padding:6px 10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 640px)}
+#bottombar .sep{width:1px;height:20px;background:var(--line)}
+#tip{position:fixed;pointer-events:none;background:#000c;color:#fff;padding:4px 7px;border-radius:5px;font-size:12px;display:none;z-index:20;white-space:nowrap}
+#toast{position:fixed;top:56px;left:50%;transform:translateX(-50%);background:#000d;color:#fff;padding:7px 12px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:30;max-width:90vw;text-align:center}
+#loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#d9d6d0;color:#333;font-size:15px;z-index:50}
+.muted{color:var(--text-muted);font-size:11px}
+.err-text{color:var(--bad)}
+@media (max-width:900px){
+  .side{width:min(300px,calc(100vw - 20px))}
+  #left{top:58px}
+  #right{top:auto;bottom:60px}
+  .side{bottom:auto;max-height:45vh}
+  #bottombar{max-width:calc(100vw - 20px)}
+}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="loading">Loading simulator…</div>
+<div id="app"><canvas id="gl"></canvas></div>
+
+<div id="topbar" class="hud">
+  <b>Front-Load Washer</b><span class="sub">27″ · 4.5 cu ft · Inverter direct drive · modelled on WM4000H*A service data</span>
+  <span id="clock" class="pill">sim 00:00:00</span>
+</div>
+
+<div id="left" class="hud side">
+  <h2 data-toggle="left">Diagnostics &amp; sensors <span>▾</span></h2>
+  <div class="body">
+    <h3>Controller</h3>
+    <div class="kv">
+      <span>State</span><span id="d-state">OFF</span>
+      <span>Process</span><span id="d-proc">—</span>
+      <span>Drum motion</span><span id="d-motion">—</span>
+      <span>Remaining</span><span id="d-remain">—</span>
+      <span>Error</span><span id="d-err">none</span>
+    </div>
+    <h3>Live traces</h3>
+    <div class="chart"><div class="ttl"><span>Drum speed (rpm)</span><b id="c-rpm-v">0</b></div><canvas id="c-rpm"></canvas></div>
+    <div class="chart"><div class="ttl"><span>Water-level sensor (kHz)</span><b id="c-freq-v">25.50</b></div><canvas id="c-freq"></canvas></div>
+    <div class="chart"><div class="ttl"><span>Wash thermistor (°C)</span><b id="c-temp-v">20</b></div><canvas id="c-temp"></canvas></div>
+    <h3>Motor &amp; drum</h3>
+    <div class="kv">
+      <span>Speed / target</span><span id="d-rpm">0 / 0 rpm</span>
+      <span>Motor torque</span><span id="d-torque">0.0 N·m</span>
+      <span>Motor power</span><span id="d-power">0 W</span>
+      <span>Slot whine freq</span><span id="d-slot">0 Hz</span>
+      <span>Drum g-force</span><span id="d-g">0.0 g</span>
+      <span>Load inertia (est.)</span><span id="d-inertia">—</span>
+      <span>Load mass (AI DD est.)</span><span id="d-mass">—</span>
+      <span>Fabric (AI DD)</span><span id="d-fabric">—</span>
+      <span>Imbalance (est.)</span><span id="d-unb">—</span>
+      <span>Tub vibration</span><span id="d-vib">0.0 mm</span>
+      <span>Spin limit</span><span id="d-limit">—</span>
+    </div>
+    <h3>Water</h3>
+    <div class="kv">
+      <span>Free water in tub</span><span id="d-vol">0.0 L</span>
+      <span>Held in fabric</span><span id="d-held">0.0 L</span>
+      <span>Head at sensor</span><span id="d-head">0 mm</span>
+      <span>Valves (pre/main/hot/bleach)</span><span id="d-valves">····</span>
+      <span>Inflow</span><span id="d-in">0.0 L/min</span>
+      <span>Drain pump</span><span id="d-pump">off</span>
+      <span>Circulation pump</span><span id="d-circ">off</span>
+      <span>Heater (1100 W)</span><span id="d-heat">off</span>
+      <span>Suds index</span><span id="d-suds">0</span>
+      <span>Detergent conc.</span><span id="d-det">0 g/L</span>
+      <span>Soil in water</span><span id="d-soil">0 g/L</span>
+      <span>Water used (cycle)</span><span id="d-used">0 L</span>
+      <span>Energy (cycle)</span><span id="d-energy">0 Wh</span>
+    </div>
+    <h3>Door</h3>
+    <div class="kv">
+      <span>Door switch</span><span id="d-door">closed</span>
+      <span>Lock (PTC + solenoid)</span><span id="d-lock">unlocked</span>
+    </div>
+    <p class="muted">Sensor thresholds, error timeouts and the process sequence follow the WM4000H*A service manual (water level 25.5 kHz empty, 24.6 kHz minimum fill, 23.0 kHz suds, 21.3 kHz overflow, IE 8/20 min, OE 10 min).</p>
+  </div>
+</div>
+
+<div id="right" class="hud side">
+  <h2 data-toggle="right">Laundry, supply &amp; faults <span>▾</span></h2>
+  <div class="body">
+    <h3>Laundry basket <span class="muted">(open the door first)</span></h3>
+    <div class="row" id="garment-buttons"></div>
+    <div class="row"><button class="btn" id="btn-preset">Typical mixed load</button><button class="btn" id="btn-unbal">Single bath mat (unbalanced)</button><button class="btn" id="btn-unload">Unload all</button></div>
+    <div class="gl" id="garment-list"></div>
+    <div class="muted" id="load-total">Load: 0.0 kg dry</div>
+
+    <h3>Dispenser drawer <span class="muted">(click drawer to open)</span></h3>
+    <div class="ctl"><span>Main detergent</span><input type="range" id="s-det" min="0" max="150" step="5" value="45"><output id="o-det">45 mL</output></div>
+    <div class="ctl"><span>Pre-wash det.</span><input type="range" id="s-pre" min="0" max="80" step="5" value="0"><output id="o-pre">0 mL</output></div>
+    <div class="ctl"><span>Bleach</span><input type="range" id="s-bleach" min="0" max="120" step="10" value="0"><output id="o-bleach">0 mL</output></div>
+    <div class="ctl"><span>Softener</span><input type="range" id="s-soft" min="0" max="80" step="5" value="0"><output id="o-soft">0 mL</output></div>
+    <label class="chk"><input type="checkbox" id="chk-he" checked> HE (low-suds) detergent</label>
+    <div class="row"><button class="btn" id="btn-fill-disp">Fill drawer</button></div>
+
+    <h3>Water supply &amp; drain</h3>
+    <label class="chk"><input type="checkbox" id="chk-cold" checked> Cold faucet open</label>
+    <label class="chk"><input type="checkbox" id="chk-hot" checked> Hot faucet open</label>
+    <div class="ctl"><span>Supply pressure</span><input type="range" id="s-psi" min="0" max="120" step="5" value="60"><output id="o-psi">60 psi</output></div>
+    <div class="ctl"><span>Hot supply temp</span><input type="range" id="s-hott" min="30" max="65" step="1" value="49"><output id="o-hott">49 °C</output></div>
+    <div class="ctl"><span>Cold supply temp</span><input type="range" id="s-coldt" min="2" max="25" step="1" value="13"><output id="o-coldt">13 °C</output></div>
+    <div class="ctl"><span>Drain hose height</span><input type="range" id="s-hose" min="10" max="120" step="1" value="36"><output id="o-hose">36″</output></div>
+    <label class="chk"><input type="checkbox" id="chk-kink"> Drain hose kinked</label>
+    <label class="chk"><input type="checkbox" id="chk-clog"> Coins / lint in drain-pump filter</label>
+    <div class="row"><button class="btn" id="btn-clean-filter">Clean pump filter</button></div>
+
+    <h3>Fault injection</h3>
+    <label class="chk"><input type="checkbox" id="f-therm"> Thermistor open circuit</label>
+    <label class="chk"><input type="checkbox" id="f-press"> Pressure sensor failed</label>
+    <label class="chk"><input type="checkbox" id="f-motor"> Motor harness unplugged</label>
+    <label class="chk"><input type="checkbox" id="f-doorsw"> Door switch faulty</label>
+    <label class="chk"><input type="checkbox" id="f-valve"> Inlet valve stuck open</label>
+    <label class="chk"><input type="checkbox" id="f-vib"> Vibration sensor unplugged</label>
+    <label class="chk"><input type="checkbox" id="f-level"> Washer not level (one foot short)</label>
+    <div class="row"><button class="btn" id="btn-power-cut">Power outage (5 s)</button></div>
+
+    <h3>Service</h3>
+    <div class="row"><button class="btn" id="btn-testmode">Load test mode</button><button class="btn" id="btn-freqcheck">Show water-level freq.</button></div>
+    <p class="muted">Load test mode starts from power-off with an empty drum (service manual §6-2); <b>Start/Pause</b> then steps through the 12 checks and <b>Power</b> exits.</p>
+  </div>
+</div>
+
+<div id="bottombar" class="hud">
+  <span class="muted">Speed</span>
+  <button class="btn ts on" data-ts="1">1×</button><button class="btn ts" data-ts="5">5×</button><button class="btn ts" data-ts="20">20×</button><button class="btn ts" data-ts="60">60×</button>
+  <span class="sep"></span>
+  <button class="btn" id="btn-xray">X-ray</button>
+  <button class="btn" id="btn-sound">Sound: off</button>
+  <span class="sep"></span>
+  <button class="btn cam" data-cam="front">Front</button><button class="btn cam" data-cam="panel">Panel</button><button class="btn cam" data-cam="drum">Drum</button><button class="btn cam" data-cam="side">3/4</button><button class="btn cam" data-cam="back">Back</button>
+</div>
+
+<div id="tip"></div>
+<div id="toast"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+// ============================================================================
+// SPEC — every number here is taken from (or derived from) the WM4000H*A
+// owner's manual (MFL71728908), the WM4000H*A service manual and the LG
+// Pro-Builder spec sheet, plus measurements scaled off the official product
+// photos (27" cabinet width = 630 px  →  0.001089 m/px).
+// ============================================================================
+const IN = 0.0254;
+const DEG = Math.PI / 180;
+const SPEC = {
+  cab: { W: 27 * IN, H: 39 * IN, D: 0.705, feet: 0.012, topY: 0.986 },  // 27" x 39" x 30 1/4" (incl. door)
+  bandBottom: 0.835,                    // control band / front panel seam (photo)
+  seamArcR: 0.318,                      // seam arcs concentric with the door (photo)
+  door: { cx: 0, cy: 0.552, R: 0.308, rim: 0.008, windowR: 0.218, hingeX: -0.318 },
+  drawer: { x0: -0.338, x1: -0.128, y0: 0.838, y1: 0.978 },
+  knob: { x: 0, y: 0.936, ringR: 0.041, capR: 0.030 },
+  power: { x: -0.078, y: 0.894, r: 0.0155 },
+  start: { x: 0.078, y: 0.894, r: 0.0155 },
+  display: { x0: 0.138, x1: 0.316, y0: 0.892, y1: 0.975 },
+  drainCover: { x0: -0.283, x1: -0.122, y0: 0.030, y1: 0.136 },
+  tilt: 10 * DEG,                       // "Tilted drum 10°" (service manual 2-1)
+  drum: { R: 0.295, depth: 0.46, front: -0.030, lipR: 0.212, lifterH: 0.062 }, // 4.5 cu ft DOE
+  tub: { R: 0.318, len: 0.50, sumpDepth: 0.05, sumpL: 1.2 },
+  gasket: { outerR: 0.245, innerR: 0.205 },
+  washRpm: 46,                          // "Revolution speed – wash 46 rpm"
+  maxRpm: 1300,
+  spinRpm: { 'Extra High': 1300, 'High': 1000, 'Medium': 800, 'Low': 400, 'No Spin': 0 },
+  heaterW: 1100, drainPumpW: 40, washMotorW: 225,
+  freqEmpty: 25.5, freqPerMm: 0.00973,  // pressure sensor: kHz fall per mm of head
+  freqMinFill: 24.6, freqSuds: 23.0, freqOverflow: 21.3, freqSensorLo: 10, freqSensorHi: 30,
+  ieMinFillMin: 8, ieFullMin: 20, oeMin: 10,
+  motor: { slots: 36, magnets: 12, Tmax: 34, Pmax: 520 },
+  doorUnlockTempC: 45,                  // Add Item refused above 113 °F
+  delayMaxH: 19, freshCareH: 19,
+};
+SPEC.floorY = 0;
+
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (cur, target, rate, dt) => cur + (target - cur) * (1 - Math.exp(-rate * dt));
+const rand = (a, b) => a + Math.random() * (b - a);
+const fmtMin = (m) => { m = Math.max(0, Math.ceil(m)); return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`; };
+const $ = (id) => document.getElementById(id);
+
+// ============================================================================
+// AUDIO — everything is synthesised from the plant state (no samples).
+// ============================================================================
+class AudioEngine {
+  constructor() { this.enabled = false; this.ctx = null; }
+  init() {
+    if (this.ctx) return;
+    const ctx = this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.master = ctx.createGain(); this.master.gain.value = 0.5; this.master.connect(ctx.destination);
+    const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const noise = () => { const n = ctx.createBufferSource(); n.buffer = noiseBuf; n.loop = true; n.start(); return n; };
+    // motor: slot-harmonic whine + PWM carrier + bearing/air rush
+    this.mSlot = ctx.createOscillator(); this.mSlot.type = 'sawtooth';
+    this.mSlot2 = ctx.createOscillator(); this.mSlot2.type = 'triangle';
+    const mBp = ctx.createBiquadFilter(); mBp.type = 'lowpass'; mBp.frequency.value = 1800;
+    this.mGain = ctx.createGain(); this.mGain.gain.value = 0;
+    this.mSlot.connect(mBp); this.mSlot2.connect(mBp); mBp.connect(this.mGain); this.mGain.connect(this.master);
+    this.pwm = ctx.createOscillator(); this.pwm.type = 'sine'; this.pwm.frequency.value = 2600;
+    this.pwmGain = ctx.createGain(); this.pwmGain.gain.value = 0; this.pwm.connect(this.pwmGain); this.pwmGain.connect(this.master);
+    this.air = noise(); const aLp = ctx.createBiquadFilter(); aLp.type = 'bandpass'; aLp.frequency.value = 500; aLp.Q.value = 0.6;
+    this.airGain = ctx.createGain(); this.airGain.gain.value = 0; this.air.connect(aLp); aLp.connect(this.airGain); this.airGain.connect(this.master);
+    this.airF = aLp;
+    // water inlet hiss
+    this.fill = noise(); const fBp = ctx.createBiquadFilter(); fBp.type = 'bandpass'; fBp.frequency.value = 1700; fBp.Q.value = 0.9;
+    this.fillGain = ctx.createGain(); this.fillGain.gain.value = 0; this.fill.connect(fBp); fBp.connect(this.fillGain); this.fillGain.connect(this.master);
+    // slosh
+    this.slosh = noise(); const sLp = ctx.createBiquadFilter(); sLp.type = 'lowpass'; sLp.frequency.value = 650;
+    this.sloshGain = ctx.createGain(); this.sloshGain.gain.value = 0; this.slosh.connect(sLp); sLp.connect(this.sloshGain); this.sloshGain.connect(this.master);
+    // drain pump: synchronous motor hum (60 Hz mains → 120 Hz magnetostriction) + gurgle
+    this.pump = ctx.createOscillator(); this.pump.type = 'square'; this.pump.frequency.value = 120;
+    const pLp = ctx.createBiquadFilter(); pLp.type = 'lowpass'; pLp.frequency.value = 420;
+    this.pumpGain = ctx.createGain(); this.pumpGain.gain.value = 0; this.pump.connect(pLp); pLp.connect(this.pumpGain); this.pumpGain.connect(this.master);
+    this.gurgle = noise(); const gBp = ctx.createBiquadFilter(); gBp.type = 'bandpass'; gBp.frequency.value = 280; gBp.Q.value = 3;
+    this.gurgleGain = ctx.createGain(); this.gurgleGain.gain.value = 0; this.gurgle.connect(gBp); gBp.connect(this.gurgleGain); this.gurgleGain.connect(this.master);
+    this.circ = ctx.createOscillator(); this.circ.type = 'triangle'; this.circ.frequency.value = 120;
+    this.circGain = ctx.createGain(); this.circGain.gain.value = 0; this.circ.connect(this.circGain); this.circGain.connect(this.master);
+    [this.mSlot, this.mSlot2, this.pwm, this.pump, this.circ].forEach(o => o.start());
+  }
+  setEnabled(on) {
+    if (on) this.init();
+    this.enabled = on;
+    if (this.ctx) { if (on) this.ctx.resume(); else this.ctx.suspend(); }
+  }
+  _ramp(param, v, t = 0.08) { if (!this.ctx) return; param.setTargetAtTime(v, this.ctx.currentTime, t); }
+  update(p) {
+    if (!this.enabled || !this.ctx) return;
+    const rpm = Math.abs(p.rpm);
+    const slot = SPEC.motor.slots * rpm / 60;
+    this._ramp(this.mSlot.frequency, Math.max(20, slot), 0.05);
+    this._ramp(this.mSlot2.frequency, Math.max(20, slot * 2), 0.05);
+    const tq = Math.abs(p.torque);
+    this._ramp(this.mGain.gain, (rpm > 1 ? 0.025 + 0.004 * tq : 0) * (p.powered ? 1 : 0.4));
+    this._ramp(this.pwmGain.gain, p.motorOn ? 0.004 + 0.0007 * tq : 0);
+    this._ramp(this.airGain.gain, Math.min(0.32, (rpm / 1300) ** 2 * 0.32 + rpm / 1300 * 0.04));
+    this._ramp(this.airF.frequency, 250 + rpm * 0.9);
+    this._ramp(this.fillGain.gain, Math.min(0.22, p.inflow / 9 * 0.17));
+    this._ramp(this.sloshGain.gain, Math.min(0.3, p.slosh * 0.5));
+    this._ramp(this.pumpGain.gain, p.pumpOn ? (p.pumpDry ? 0.07 : 0.045) : 0);
+    this._ramp(this.gurgleGain.gain, p.pumpOn ? (p.pumpDry ? 0.18 : 0.06) : 0);
+    this._ramp(this.circGain.gain, p.circOn ? 0.03 : 0);
+  }
+  _tone(freq, t0, dur, vol = 0.12, type = 'sine') {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(vol, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+    const o2 = c.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2; const g2 = c.createGain(); g2.gain.value = 0.18;
+    o2.connect(g2); g2.connect(g);
+    o.connect(g); g.connect(this.master); o.start(t0); o2.start(t0); o.stop(t0 + dur + 0.05); o2.stop(t0 + dur + 0.05);
+  }
+  _seq(notes, bpm = 150, vol = 0.12) {
+    if (!this.enabled || !this.ctx) return;
+    let t = this.ctx.currentTime + 0.02; const beat = 60 / bpm;
+    for (const [n, len] of notes) { if (n) this._tone(noteHz(n), t, Math.max(0.12, len * beat * 0.95), vol); t += len * beat; }
+  }
+  beep() { this._seq([['A6', 0.25]], 240, 0.08); }
+  deny() { this._seq([['E6', 0.3], [null, 0.15], ['E6', 0.3]], 240, 0.09); }
+  powerOn() { this._seq([['C6', 0.5], ['E6', 0.5], ['G6', 0.5], ['C7', 1]], 300, 0.09); }
+  powerOff() { this._seq([['C7', 0.5], ['G6', 0.5], ['E6', 0.5], ['C6', 1]], 300, 0.09); }
+  errorAlarm() { this._seq([['B6', 0.5], [null, 0.25], ['B6', 0.5], [null, 0.25], ['B6', 0.5]], 220, 0.1); }
+  // End-of-cycle melody: Schubert "Die Forelle" (1817, public domain).
+  endSong() {
+    this._seq([
+      ['G5', .5], ['C6', .5], ['C6', .5], ['E6', .5], ['E6', .5], ['C6', .5], ['G5', 1],
+      ['G5', .5], ['A5', .5], ['G5', .5], ['F5', .5], ['E5', .5], ['D5', .5], ['C5', 1],
+      ['G5', .5], ['C6', .5], ['C6', .5], ['E6', .5], ['E6', .5], ['C6', .5], ['G5', 1],
+      ['A5', .5], ['B5', .5], ['C6', .5], ['D6', .5], ['E6', .5], ['D6', .5], ['C6', 1.5]], 170, 0.1);
+  }
+  click() {
+    if (!this.enabled || !this.ctx) return;
+    const c = this.ctx, t = c.currentTime;
+    for (const dt of [0, 0.045]) {
+      const o = c.createOscillator(), g = c.createGain(); o.type = 'square'; o.frequency.value = 900 + Math.random() * 300;
+      g.gain.setValueAtTime(0.12, t + dt); g.gain.exponentialRampToValueAtTime(0.001, t + dt + 0.03);
+      o.connect(g); g.connect(this.master); o.start(t + dt); o.stop(t + dt + 0.04);
+    }
+  }
+  thump(strength) {
+    if (!this.enabled || !this.ctx) return;
+    const c = this.ctx, t = c.currentTime, o = c.createOscillator(), g = c.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(95, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    g.gain.setValueAtTime(Math.min(0.25, 0.05 + strength * 0.05), t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.2);
+  }
+}
+function noteHz(n) {
+  const m = /^([A-G])(#?)(\d)$/.exec(n); const idx = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]] + (m[2] ? 1 : 0);
+  return 440 * Math.pow(2, ((+m[3] + 1) * 12 + idx - 69) / 12);
+}
+const audio = new AudioEngine();
+// ============================================================================
+// RENDERER / SCENE / ROOM
+// ============================================================================
+const canvas = $('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd9d6d0);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.03).texture;
+scene.environmentIntensity = 0.85;
+
+const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.02, 30);
+camera.position.set(0.55, 1.25, 2.05);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 0.55, 0);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.minDistance = 0.25; controls.maxDistance = 5; controls.maxPolarAngle = Math.PI * 0.53;
+controls.update();
+
+const hemi = new THREE.HemisphereLight(0xfff8ef, 0x6b6157, 0.55); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff3e2, 2.0);
+sun.position.set(1.6, 2.8, 2.2); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = -1.4; sun.shadow.camera.right = 1.4;
+sun.shadow.camera.top = 1.6; sun.shadow.camera.bottom = -0.3; sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 7;
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.02; sun.shadow.radius = 4;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xe8f0ff, 0.6); fill.position.set(-2, 1.4, 1.5); scene.add(fill);
+const drumLight = new THREE.PointLight(0xfff5e6, 0.0, 1.2, 1.5); // light that leaks through the door glass
+scene.add(drumLight);
+
+// ---- procedural texture helpers -------------------------------------------------
+function canvasTex(w, h, draw, { srgb = true, repeat = null } = {}) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); draw(g, w, h);
+  const t = new THREE.CanvasTexture(c);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  t.userData.canvas = c; t.userData.ctx = g;
+  return t;
+}
+// Height canvas → tangent-space normal map
+function normalFromHeight(hc, strength = 2.0, repeat = null) {
+  const w = hc.width, h = hc.height, src = hc.getContext('2d').getImageData(0, 0, w, h).data;
+  const out = document.createElement('canvas'); out.width = w; out.height = h;
+  const og = out.getContext('2d'), img = og.createImageData(w, h), o = img.data;
+  const H = (x, y) => src[(((y + h) % h) * w + ((x + w) % w)) * 4] / 255;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const dx = (H(x + 1, y) - H(x - 1, y)) * strength, dy = (H(x, y + 1) - H(x, y - 1)) * strength;
+    const nx = -dx, ny = dy, nz = 1, l = Math.hypot(nx, ny, nz), i = (y * w + x) * 4;
+    o[i] = (nx / l * 0.5 + 0.5) * 255; o[i + 1] = (ny / l * 0.5 + 0.5) * 255; o[i + 2] = (nz / l * 0.5 + 0.5) * 255; o[i + 3] = 255;
+  }
+  og.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(out);
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+// LG-style drum skin: brushed stainless, staggered perforations and raised tear-drop embossing.
+function makeDrumSkin(repeat, holeDense = false) {
+  const W = 1024, H = 512;
+  const hc = document.createElement('canvas'); hc.width = W; hc.height = H; const hg = hc.getContext('2d');
+  hg.fillStyle = '#808080'; hg.fillRect(0, 0, W, H);
+  const holes = [];
+  const sp = holeDense ? 18 : 30;
+  for (let row = 0, y = sp / 2; y < H; y += sp * 0.866, row++)
+    for (let x = (row % 2) * sp / 2 + sp / 4; x < W; x += sp) holes.push([x, y]);
+  if (!holeDense) { // embossed tear drops between holes
+    for (let row = 0, y = 40; y < H; y += 120, row++) for (let x = 60 + (row % 2) * 120; x < W; x += 240) {
+      const gr = hg.createRadialGradient(x, y, 2, x, y, 34); gr.addColorStop(0, '#d8d8d8'); gr.addColorStop(1, '#808080');
+      hg.fillStyle = gr; hg.beginPath(); hg.ellipse(x, y, 30, 18, 0, 0, Math.PI * 2); hg.fill();
+    }
+  }
+  hg.fillStyle = '#101010'; for (const [x, y] of holes) { hg.beginPath(); hg.arc(x, y, holeDense ? 3.2 : 4.2, 0, Math.PI * 2); hg.fill(); }
+  const normal = normalFromHeight(hc, holeDense ? 2.0 : 1.4, repeat);
+  const color = canvasTex(W, H, (g) => {
+    g.fillStyle = '#b8bcc0'; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 2600; i++) { // brushing
+      const y = Math.random() * H, a = Math.random() * 0.08; g.strokeStyle = `rgba(${Math.random() < .5 ? '255,255,255' : '40,45,50'},${a})`;
+      g.beginPath(); g.moveTo(Math.random() * W, y); g.lineTo(Math.random() * W, y + rand(-0.6, 0.6)); g.stroke();
+    }
+    g.fillStyle = '#0d0f12'; for (const [x, y] of holes) { g.beginPath(); g.arc(x, y, holeDense ? 3.4 : 4.4, 0, Math.PI * 2); g.fill(); }
+  }, { repeat });
+  const rough = canvasTex(W, H, (g) => {
+    g.fillStyle = '#5a5a5a'; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 1600; i++) { g.fillStyle = `rgba(${Math.random() < .5 ? 255 : 0},${Math.random() < .5 ? 255 : 0},255,0.05)`; g.fillRect(Math.random() * W, Math.random() * H, rand(20, 120), 1); }
+    g.fillStyle = '#ffffff'; for (const [x, y] of holes) { g.beginPath(); g.arc(x, y, 4.4, 0, Math.PI * 2); g.fill(); }
+  }, { srgb: false, repeat });
+  return { color, normal, rough };
+}
+function noiseTex(w, h, base, amt, repeat) {
+  return canvasTex(w, h, (g) => {
+    g.fillStyle = base; g.fillRect(0, 0, w, h);
+    const img = g.getImageData(0, 0, w, h), d = img.data;
+    for (let i = 0; i < d.length; i += 4) { const n = (Math.random() - 0.5) * amt; d[i] += n; d[i + 1] += n; d[i + 2] += n; }
+    g.putImageData(img, 0, 0);
+  }, { repeat });
+}
+function fabricTex(color, pattern) {
+  return canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = color; g.fillRect(0, 0, w, h);
+    const c = new THREE.Color(color);
+    if (pattern === 'stripes') { g.fillStyle = 'rgba(255,255,255,0.75)'; for (let y = 0; y < h; y += 32) g.fillRect(0, y, w, 12); }
+    if (pattern === 'denim') { for (let i = 0; i < 1400; i++) { g.strokeStyle = `rgba(255,255,255,${rand(.03, .12)})`; const x = rand(0, w), y = rand(0, h); g.beginPath(); g.moveTo(x, y); g.lineTo(x + 6, y + 6); g.stroke(); } }
+    if (pattern === 'check') { g.fillStyle = 'rgba(0,0,0,0.25)'; for (let x = 0; x < w; x += 64) g.fillRect(x, 0, 24, h); for (let y = 0; y < h; y += 64) g.fillRect(0, y, w, 24); }
+    if (pattern === 'terry') { for (let i = 0; i < 5000; i++) { g.fillStyle = `rgba(${Math.random() < .5 ? '255,255,255' : '0,0,0'},${rand(.04, .14)})`; g.beginPath(); g.arc(rand(0, w), rand(0, h), rand(1, 2.4), 0, 7); g.fill(); } }
+    if (pattern === 'print') { for (let i = 0; i < 20; i++) { g.fillStyle = `hsla(${rand(0, 360)},70%,60%,.8)`; g.beginPath(); g.arc(rand(0, w), rand(0, h), rand(8, 22), 0, 7); g.fill(); } }
+    // weave
+    for (let y = 0; y < h; y += 2) { g.fillStyle = `rgba(0,0,0,${0.03 + 0.03 * (y % 4 === 0)})`; g.fillRect(0, y, w, 1); }
+    for (let x = 0; x < w; x += 2) { g.fillStyle = `rgba(255,255,255,${0.025 * (x % 4 === 0)})`; g.fillRect(x, 0, 1, h); }
+    void c;
+  }, { repeat: [2, 2] });
+}
+
+// ---- materials ------------------------------------------------------------------
+const enamelNoise = noiseTex(256, 256, '#808080', 6, [8, 8]);
+const MAT = {
+  enamel: new THREE.MeshPhysicalMaterial({ color: 0xf3f4f2, roughness: 0.32, clearcoat: 1.0, clearcoatRoughness: 0.12, bumpMap: enamelNoise, bumpScale: 0.15 }),
+  enamelPanel: new THREE.MeshPhysicalMaterial({ color: 0xf6f7f5, roughness: 0.22, clearcoat: 1.0, clearcoatRoughness: 0.06 }),
+  sideEnamel: new THREE.MeshPhysicalMaterial({ color: 0xf0f1ef, roughness: 0.4, clearcoat: 0.6, clearcoatRoughness: 0.25 }),
+  backSteel: new THREE.MeshStandardMaterial({ color: 0xb9bbbd, roughness: 0.55, metalness: 0.6 }),
+  roseGold: new THREE.MeshPhysicalMaterial({ color: 0xcfa18b, metalness: 1.0, roughness: 0.28, clearcoat: 0.4 }),
+  knobCap: null, // set after texture
+  blackGloss: new THREE.MeshPhysicalMaterial({ color: 0x07080a, roughness: 0.08, clearcoat: 1, clearcoatRoughness: 0.03, metalness: 0.1 }),
+  tintedGlass: new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.02, metalness: 0.0, transmission: 1.0, thickness: 0.012, ior: 1.5, attenuationColor: new THREE.Color(0x4a5560), attenuationDistance: 0.035, clearcoat: 1, clearcoatRoughness: 0.02, specularIntensity: 1 }),
+  clearGlass: new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.02, metalness: 0.0, transmission: 1.0, thickness: 0.01, ior: 1.5, attenuationColor: new THREE.Color(0xc8d6dc), attenuationDistance: 0.6, transparent: true, side: THREE.DoubleSide }),
+  doorPlastic: new THREE.MeshStandardMaterial({ color: 0x8d9095, roughness: 0.55, metalness: 0.15 }),
+  rubber: new THREE.MeshStandardMaterial({ color: 0x8f969d, roughness: 0.72, metalness: 0.0, side: THREE.DoubleSide }),
+  darkRubber: new THREE.MeshStandardMaterial({ color: 0x2a2c2f, roughness: 0.8 }),
+  tub: new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: 0.75, metalness: 0.05, side: THREE.DoubleSide }),
+  tubInside: new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 0.9, side: THREE.BackSide }),
+  plasticWhite: new THREE.MeshStandardMaterial({ color: 0xf2f2f0, roughness: 0.35 }),
+  plasticGrey: new THREE.MeshStandardMaterial({ color: 0x9da2a8, roughness: 0.5 }),
+  plasticDark: new THREE.MeshStandardMaterial({ color: 0x33363a, roughness: 0.6 }),
+  copper: new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.35, metalness: 1.0 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0xc9cdd1, roughness: 0.3, metalness: 1.0 }),
+  spring: new THREE.MeshStandardMaterial({ color: 0x8e9398, roughness: 0.35, metalness: 1.0 }),
+  concrete: new THREE.MeshStandardMaterial({ color: 0x8c8a86, roughness: 0.95 }),
+  hose: new THREE.MeshStandardMaterial({ color: 0x8e939a, roughness: 0.6 }),
+  inletHose: new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.5 }),
+  pcb: new THREE.MeshStandardMaterial({ color: 0x1f5e3a, roughness: 0.6 }),
+  led: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+};
+const drumSkin = makeDrumSkin([6, 2]);
+MAT.drum = new THREE.MeshStandardMaterial({ map: drumSkin.color, normalMap: drumSkin.normal, roughnessMap: drumSkin.rough, roughness: 0.55, metalness: 1.0, side: THREE.DoubleSide, normalScale: new THREE.Vector2(0.6, 0.6) });
+const backSkin = makeDrumSkin([3, 3]);
+MAT.drumBack = new THREE.MeshStandardMaterial({ map: backSkin.color, normalMap: backSkin.normal, roughnessMap: backSkin.rough, roughness: 0.55, metalness: 1.0 });
+const lifterSkin = makeDrumSkin([1, 4], true);
+MAT.lifter = new THREE.MeshStandardMaterial({ map: lifterSkin.color, normalMap: lifterSkin.normal, roughness: 0.4, metalness: 1.0, side: THREE.DoubleSide });
+// brushed concentric rose-gold for the knob cap
+const capTex = canvasTex(512, 512, (g, w, h) => {
+  g.fillStyle = '#c99c86'; g.fillRect(0, 0, w, h);
+  for (let r = 2; r < 256; r += 1) { g.strokeStyle = `rgba(${Math.random() < .5 ? '255,235,225' : '120,80,70'},${rand(.04, .14)})`; g.beginPath(); g.arc(256, 256, r, 0, Math.PI * 2); g.stroke(); }
+});
+MAT.knobCap = new THREE.MeshPhysicalMaterial({ map: capTex, metalness: 1.0, roughness: 0.22, clearcoat: 0.5, clearcoatRoughness: 0.15 });
+
+// ---- room --------------------------------------------------------------------------
+(function buildRoom() {
+  const floorTex = canvasTex(1024, 1024, (g, w, h) => {
+    g.fillStyle = '#b9b2a8'; g.fillRect(0, 0, w, h);
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+      const v = rand(-10, 10); g.fillStyle = `rgb(${185 + v},${178 + v},${168 + v})`; g.fillRect(x * 256 + 2, y * 256 + 2, 252, 252);
+      for (let i = 0; i < 600; i++) { g.fillStyle = `rgba(${Math.random() < .5 ? '255,255,255' : '90,80,70'},0.06)`; g.fillRect(x * 256 + rand(0, 256), y * 256 + rand(0, 256), rand(1, 4), rand(1, 4)); }
+    }
+    g.fillStyle = '#8f877c'; for (let i = 0; i <= 4; i++) { g.fillRect(i * 256 - 2, 0, 4, h); g.fillRect(0, i * 256 - 2, w, 4); }
+  }, { repeat: [3, 3] });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(6, 6), new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.55, metalness: 0.0 }));
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xe4e1db, roughness: 0.92 });
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(6, 3), wallMat); wall.position.set(0, 1.5, -0.83); wall.receiveShadow = true; scene.add(wall);
+  const side = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), wallMat); side.rotation.y = Math.PI / 2; side.position.set(-1.6, 1.5, 0.5); side.receiveShadow = true; scene.add(side);
+  const base = new THREE.Mesh(new THREE.BoxGeometry(6, 0.09, 0.015), new THREE.MeshStandardMaterial({ color: 0xf4f3f0, roughness: 0.5 }));
+  base.position.set(0, 0.045, -0.822); scene.add(base);
+  // standpipe + faucet box on the wall behind the washer
+  const box = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.06), new THREE.MeshStandardMaterial({ color: 0xf6f6f4, roughness: 0.4 }));
+  box.position.set(0.18, 1.18, -0.80); scene.add(box);
+  for (const [x, c] of [[0.13, 0xd03030], [0.23, 0x2f62d8]]) {
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.04, 16), new THREE.MeshStandardMaterial({ color: c, roughness: 0.4 }));
+    h.rotation.x = Math.PI / 2; h.position.set(x, 1.19, -0.755); scene.add(h);
+  }
+  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.5, 20), new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.4 }));
+  pipe.position.set(0.32, 0.92, -0.79); scene.add(pipe);
+  // contact shadow
+  const cs = canvasTex(256, 256, (g) => { const gr = g.createRadialGradient(128, 128, 20, 128, 128, 128); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = gr; g.fillRect(0, 0, 256, 256); });
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1.05, 1.1), new THREE.MeshBasicMaterial({ map: cs, transparent: true, depthWrite: false }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.set(0, 0.001, -0.33); scene.add(shadow);
+})();
+// ============================================================================
+// MODEL — built to the measured layout (see SPEC)
+// ============================================================================
+const W = SPEC.cab.W, HW = W / 2, D = SPEC.cab.D;
+const washer = new THREE.Group(); scene.add(washer);
+const interactive = [];        // meshes that respond to clicks
+const xrayMats = [MAT.enamel, MAT.enamelPanel, MAT.sideEnamel, MAT.backSteel];
+const xrayHidden = [];         // objects hidden in x-ray (decals)
+function addI(mesh, action, hint) { mesh.userData.action = action; mesh.userData.hint = hint; interactive.push(mesh); return mesh; }
+function shadowy(o, cast = true, recv = true) { o.traverse(m => { if (m.isMesh) { m.castShadow = cast; m.receiveShadow = recv; } }); return o; }
+function cyl(rt, rb, h, seg, mat) { return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat); }
+function between(mesh, a, b) { // orient a +Y unit mesh from a to b
+  const dir = new THREE.Vector3().subVectors(b, a), len = dir.length();
+  mesh.position.copy(a).addScaledVector(dir, 0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  mesh.scale.set(1, len, 1);
+}
+function lathe(points, segs, mat) { // points: [r, z]; axis = +Z (toward viewer)
+  const g = new THREE.LatheGeometry(points.map(([r, z]) => new THREE.Vector2(r, z)), segs);
+  if (mat.side !== THREE.DoubleSide) { mat.side = THREE.DoubleSide; mat.needsUpdate = true; }
+  const m = new THREE.Mesh(g, mat); m.rotation.x = Math.PI / 2; return m;
+}
+function roundRectShape(x0, y0, x1, y1, r) {
+  const s = new THREE.Shape(); s.moveTo(x0 + r, y0); s.lineTo(x1 - r, y0); s.quadraticCurveTo(x1, y0, x1, y0 + r);
+  s.lineTo(x1, y1 - r); s.quadraticCurveTo(x1, y1, x1 - r, y1); s.lineTo(x0 + r, y1); s.quadraticCurveTo(x0, y1, x0, y1 - r);
+  s.lineTo(x0, y0 + r); s.quadraticCurveTo(x0, y0, x0 + r, y0); return s;
+}
+function setPlanarUV(geo, x0, x1, y0, y1) {
+  const p = geo.attributes.position, uv = new Float32Array(p.count * 2);
+  for (let i = 0; i < p.count; i++) { uv[i * 2] = (p.getX(i) - x0) / (x1 - x0); uv[i * 2 + 1] = (p.getY(i) - y0) / (y1 - y0); }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+// ---------------- cabinet shell ----------------
+const DC = SPEC.door, yTop = SPEC.cab.topY, yBand = SPEC.bandBottom;
+const seamHalf = Math.sqrt(SPEC.seamArcR ** 2 - (yBand - DC.cy) ** 2);
+const seamA0 = Math.atan2(yBand - DC.cy, seamHalf), seamA1 = Math.PI - seamA0;
+{
+  // front panel (door ring area) with a hole for the gasket
+  const s = new THREE.Shape();
+  s.moveTo(-HW, SPEC.cab.feet + 0.004); s.lineTo(HW, SPEC.cab.feet + 0.004); s.lineTo(HW, yBand); s.lineTo(seamHalf, yBand);
+  s.absarc(DC.cx, DC.cy, SPEC.seamArcR, seamA0, seamA1, false);
+  s.lineTo(-HW, yBand); s.closePath();
+  const hole = new THREE.Path(); hole.absarc(DC.cx, DC.cy, SPEC.gasket.outerR + 0.004, 0, Math.PI * 2, true); s.holes.push(hole);
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 3, curveSegments: 96 });
+  const front = new THREE.Mesh(g, MAT.enamel); front.position.z = -0.016; washer.add(shadowy(front));
+  // shallow dished bezel around the door opening
+  const dish = lathe([[SPEC.gasket.outerR + 0.004, -0.006], [0.262, -0.002], [0.29, 0.000], [0.322, 0.0005]], 128, MAT.enamel);
+  dish.position.set(DC.cx, DC.cy, 0); washer.add(dish);
+  // sides with three embossed panels and carry-handle recesses
+  for (const sx of [-1, 1]) {
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.010, yTop - 0.03, D - 0.02), MAT.sideEnamel);
+    side.position.set(sx * (HW - 0.005), (yTop + 0.03) / 2 - 0.005, -D / 2 - 0.008); washer.add(shadowy(side));
+    for (const zc of [-0.135, -0.355, -0.575]) {
+      const shp = roundRectShape(-0.082, 0.10, 0.082, 0.925, 0.07);
+      const eg = new THREE.ExtrudeGeometry(shp, { depth: 0.002, bevelEnabled: true, bevelThickness: 0.0015, bevelSize: 0.004, bevelSegments: 2, curveSegments: 16 });
+      const em = new THREE.Mesh(eg, MAT.sideEnamel); em.rotation.y = sx * Math.PI / 2; em.position.set(sx * HW, 0, zc); washer.add(shadowy(em));
+    }
+    for (const zc of [-0.135, -0.575]) {
+      const slot = new THREE.Mesh(new RoundedBoxGeometry(0.008, 0.032, 0.09, 3, 0.014), MAT.plasticGrey);
+      slot.position.set(sx * (HW + 0.0035), 0.30, zc); washer.add(slot);
+    }
+  }
+  const back = new THREE.Mesh(new THREE.BoxGeometry(W - 0.01, yTop - 0.03, 0.006), MAT.backSteel);
+  back.position.set(0, (yTop + 0.03) / 2 - 0.005, -D + 0.003); washer.add(shadowy(back));
+  const base = new THREE.Mesh(new THREE.BoxGeometry(W - 0.02, 0.03, D - 0.03), MAT.plasticDark);
+  base.position.set(0, 0.03, -D / 2); washer.add(base);
+  // top plate with slight overhang
+  const top = new THREE.Mesh(new RoundedBoxGeometry(W + 0.004, 0.011, D + 0.012, 3, 0.004), MAT.enamel);
+  top.position.set(0, yTop + 0.0, -D / 2 + 0.006); washer.add(shadowy(top));
+  // leveling feet
+  for (const [x, z] of [[-HW + 0.05, -0.05], [HW - 0.05, -0.05], [-HW + 0.05, -D + 0.06], [HW - 0.05, -D + 0.06]]) {
+    const f = cyl(0.02, 0.022, 0.014, 20, MAT.darkRubber); f.position.set(x, 0.007, z); washer.add(f);
+    const st = cyl(0.007, 0.007, 0.03, 12, MAT.steel); st.position.set(x, 0.025, z); washer.add(st);
+  }
+  // back: inlets, shipping-bolt caps, power cord, drain hose clip
+  for (const x of [0.13, 0.215]) {
+    const inlet = cyl(0.012, 0.012, 0.03, 16, MAT.steel); inlet.rotation.x = Math.PI / 2; inlet.position.set(x, 0.905, -D - 0.012); washer.add(inlet);
+  }
+  for (const [x, y] of [[-0.22, 0.78], [0.22, 0.78], [-0.22, 0.24], [0.22, 0.24]]) {
+    const cap = cyl(0.02, 0.02, 0.006, 20, MAT.plasticWhite); cap.rotation.x = Math.PI / 2; cap.position.set(x, y, -D - 0.003); washer.add(cap);
+  }
+}
+
+// ---------------- control band, drawer, decals ----------------
+const PANEL_X0 = SPEC.drawer.x1 + 0.002, PANEL_X1 = HW, PANEL_Y0 = yBand, PANEL_Y1 = yTop - 0.0055;
+let panelDecal, displayMesh, displayTex;
+const knobGroup = new THREE.Group(); const knobLEDs = [];
+const CYCLES_LEFT = ['Normal', 'Heavy Duty', 'Bedding', 'Sanitary', 'Allergiene', 'Tub Clean'];
+const CYCLES_RIGHT = ['Bright Whites', 'Delicates', 'Perm. Press', 'Towels', 'Speed Wash', 'Downloaded'];
+const LABEL_ROWS = [0.968, 0.958, 0.948, 0.938, 0.928, 0.918];
+const KNOB_LED_R = 0.0445;
+const cycleLabelGeom = {};      // cycle → {x0,x1,y0,y1} in metres (for click picking)
+const knobAngles = {};          // cycle → angle of its LED on the ring
+{
+  const s = new THREE.Shape();
+  s.moveTo(PANEL_X0, yBand); s.lineTo(-seamHalf, yBand);
+  s.absarc(DC.cx, DC.cy, SPEC.seamArcR, seamA1, seamA0, true);
+  s.lineTo(PANEL_X1, yBand); s.lineTo(PANEL_X1, PANEL_Y1); s.lineTo(PANEL_X0, PANEL_Y1); s.closePath();
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.014, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.003, bevelSegments: 3, curveSegments: 64 });
+  const band = new THREE.Mesh(g, MAT.enamelPanel); band.position.z = -0.0;  // front face at z = 0.017
+  washer.add(shadowy(band));
+  const bandFrontZ = 0.017;
+  // printed decal (labels + leader lines)
+  const pw = 2048, ph = Math.round(2048 * (PANEL_Y1 - yBand) / (PANEL_X1 - PANEL_X0));
+  const mx = (x) => (x - PANEL_X0) / (PANEL_X1 - PANEL_X0) * pw, my = (y) => (1 - (y - yBand) / (PANEL_Y1 - yBand)) * ph;
+  const pxPerM = pw / (PANEL_X1 - PANEL_X0);
+  const decalTex = canvasTex(pw, ph, (c) => {
+    c.clearRect(0, 0, pw, ph);
+    c.textBaseline = 'middle';
+    const fs = 0.0075 * pxPerM;
+    c.font = `500 ${fs}px "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+    // STEAM CYCLE header with red underline bracket
+    c.fillStyle = '#c4473f'; c.font = `600 ${fs * 0.62}px Arial, sans-serif`; c.textAlign = 'left';
+    c.fillText('STEAM CYCLE', mx(-0.106), my(0.9765));
+    c.fillRect(mx(-0.106), my(0.9735), 0.034 * pxPerM, 2);
+    c.fillRect(mx(-0.106), my(0.9735), 2, (0.9735 - 0.932) * pxPerM);
+    c.font = `500 ${fs}px "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+    c.strokeStyle = '#8b8e93'; c.lineWidth = 2;
+    const kx = mx(SPEC.knob.x), ky = my(SPEC.knob.y);
+    const drawRow = (name, y, side) => {
+      const dy = y - SPEC.knob.y; const a = side < 0 ? Math.PI - Math.asin(dy / KNOB_LED_R) : Math.asin(dy / KNOB_LED_R);
+      knobAngles[name] = a;
+      const ex = SPEC.knob.x + Math.cos(a) * (KNOB_LED_R + 0.004);
+      c.fillStyle = '#3d4045';
+      const label = name;
+      if (side < 0) {
+        c.textAlign = 'left'; const tx = mx(-0.103); c.fillText(label, tx, my(y));
+        const tw = c.measureText(label).width; c.beginPath(); c.moveTo(tx + tw + 8, my(y)); c.lineTo(mx(ex), my(y)); c.stroke();
+        cycleLabelGeom[name] = { x0: -0.104, x1: -0.103 + tw / pxPerM, y0: y - 0.005, y1: y + 0.005 };
+      } else {
+        c.textAlign = 'right'; const tx = mx(0.106); c.fillText(label + (name === 'Bright Whites' ? '  |' : ''), tx, my(y));
+        const tw = c.measureText(label + (name === 'Bright Whites' ? '  |' : '')).width; c.beginPath(); c.moveTo(tx - tw - 8, my(y)); c.lineTo(mx(ex), my(y)); c.stroke();
+        cycleLabelGeom[name] = { x0: 0.106 - tw / pxPerM, x1: 0.107, y0: y - 0.005, y1: y + 0.005 };
+      }
+    };
+    CYCLES_LEFT.forEach((n, i) => drawRow(n, LABEL_ROWS[i], -1));
+    CYCLES_RIGHT.forEach((n, i) => drawRow(n, LABEL_ROWS[i], 1));
+    void kx; void ky;
+    // Smart Diagnosis icon next to power
+    c.strokeStyle = '#6d7076'; c.lineWidth = 3; c.beginPath(); c.arc(mx(-0.106), my(0.897), 0.0045 * pxPerM, 0, Math.PI * 2); c.stroke();
+    c.fillStyle = '#6d7076'; c.font = `${fs * 0.45}px Arial`; c.textAlign = 'center'; c.fillText('Smart', mx(-0.106), my(0.888)); c.fillText('Diagnosis', mx(-0.106), my(0.884));
+    // display annotations
+    c.textAlign = 'right'; c.font = `${fs * 0.42}px Arial`; c.fillStyle = '#6d7076';
+    c.fillText('*Extra Function : Hold 3 seconds', mx(0.316), my(0.979));
+    c.textAlign = 'center'; c.fillText('*All Cold Rinses', mx(0.205), my(0.886));
+    // anti-vibration mark (unbranded)
+    c.textAlign = 'left'; c.font = `${fs * 0.7}px "Segoe UI", Arial`; c.fillStyle = '#7a7d82';
+    c.beginPath(); c.arc(mx(0.258), my(0.869), 0.0028 * pxPerM, 0, Math.PI * 2); c.fill();
+    c.fillText('Anti-Vibration', mx(0.264), my(0.869));
+  });
+  panelDecal = new THREE.Mesh(new THREE.PlaneGeometry(PANEL_X1 - PANEL_X0, PANEL_Y1 - yBand), new THREE.MeshStandardMaterial({ map: decalTex, transparent: true, roughness: 0.4, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }));
+  panelDecal.position.set((PANEL_X0 + PANEL_X1) / 2, (PANEL_Y1 + yBand) / 2, bandFrontZ + 0.0004); washer.add(panelDecal); xrayHidden.push(panelDecal);
+  addI(panelDecal, 'panel', null);
+
+  // display window (black glass) with live canvas texture
+  const Dd = SPEC.display;
+  const dW = 1400, dH = Math.round(1400 * (Dd.y1 - Dd.y0) / (Dd.x1 - Dd.x0));
+  displayTex = canvasTex(dW, dH, (c) => { c.fillStyle = '#000'; c.fillRect(0, 0, dW, dH); });
+  const glass = new THREE.Mesh(new RoundedBoxGeometry(Dd.x1 - Dd.x0 + 0.004, Dd.y1 - Dd.y0 + 0.004, 0.004, 3, 0.0015), MAT.blackGloss);
+  glass.position.set((Dd.x0 + Dd.x1) / 2, (Dd.y0 + Dd.y1) / 2, bandFrontZ + 0.0005); washer.add(glass);
+  displayMesh = new THREE.Mesh(new THREE.PlaneGeometry(Dd.x1 - Dd.x0, Dd.y1 - Dd.y0), new THREE.MeshStandardMaterial({ map: displayTex, emissiveMap: displayTex, emissive: 0xffffff, emissiveIntensity: 1.25, roughness: 0.08, metalness: 0.0 }));
+  displayMesh.position.set((Dd.x0 + Dd.x1) / 2, (Dd.y0 + Dd.y1) / 2, bandFrontZ + 0.0027); washer.add(displayMesh);
+  addI(displayMesh, 'display', null);
+
+  // cycle knob: gloss-black bezel with LED ring + brushed rose-gold cap
+  knobGroup.position.set(SPEC.knob.x, SPEC.knob.y, bandFrontZ);
+  const bezel = lathe([[0.0, 0.0], [SPEC.knob.ringR, 0.0], [SPEC.knob.ringR + 0.0005, 0.010], [SPEC.knob.ringR - 0.002, 0.016], [SPEC.knob.capR + 0.003, 0.0175], [0.0, 0.0175]], 96, MAT.blackGloss);
+  knobGroup.add(bezel);
+  const knobCap = new THREE.Group();
+  const capBody = lathe([[0, 0.031], [0.018, 0.0305], [0.027, 0.029], [SPEC.knob.capR, 0.026], [SPEC.knob.capR, 0.016], [0.0, 0.016]], 96, MAT.knobCap);
+  knobCap.add(capBody); knobGroup.add(knobCap); knobGroup.userData.cap = knobCap;
+  washer.add(shadowy(knobGroup, true, false));
+  for (const n of [...CYCLES_LEFT, ...CYCLES_RIGHT]) {
+    const a = knobAngles[n];
+    const led = new THREE.Mesh(new THREE.CircleGeometry(0.0013, 12), new THREE.MeshBasicMaterial({ color: 0x222222 }));
+    led.position.set(Math.cos(a) * (SPEC.knob.ringR - 0.0045), Math.sin(a) * (SPEC.knob.ringR - 0.0045), 0.0177);
+    led.userData.cycle = n; knobGroup.add(led); knobLEDs.push(led);
+  }
+  addI(bezel, 'knob', 'Cycle knob — drag or scroll to turn'); addI(capBody, 'knob', 'Cycle knob — drag or scroll to turn');
+
+  // power and start/pause buttons
+  const mkButton = (spec, icon, action, hint) => {
+    const grp = new THREE.Group(); grp.position.set(spec.x, spec.y, bandFrontZ);
+    const ring = lathe([[spec.r + 0.0025, 0], [spec.r + 0.0025, 0.002], [spec.r + 0.001, 0.003], [0, 0.003]], 48, MAT.steel); grp.add(ring);
+    const capG = new THREE.Group();
+    const cap = lathe([[0, 0.0085], [spec.r * 0.7, 0.0083], [spec.r, 0.0068], [spec.r, 0.002], [0, 0.002]], 48, MAT.plasticWhite);
+    const iconTex = canvasTex(128, 128, (c) => {
+      c.clearRect(0, 0, 128, 128); c.strokeStyle = '#7d8086'; c.fillStyle = '#7d8086'; c.lineWidth = 7; c.lineCap = 'round';
+      if (icon === 'power') { c.beginPath(); c.arc(64, 66, 28, -Math.PI * 0.32, Math.PI * 1.32); c.stroke(); c.beginPath(); c.moveTo(64, 28); c.lineTo(64, 64); c.stroke(); }
+      else { c.beginPath(); c.moveTo(38, 38); c.lineTo(68, 64); c.lineTo(38, 90); c.closePath(); c.fill(); c.fillRect(76, 40, 8, 48); c.fillRect(92, 40, 8, 48); }
+    });
+    const ic = new THREE.Mesh(new THREE.CircleGeometry(spec.r * 0.62, 32), new THREE.MeshBasicMaterial({ map: iconTex, transparent: true, depthWrite: false }));
+    ic.position.z = 0.0087; capG.add(cap, ic); grp.add(capG); grp.userData.cap = capG;
+    addI(cap, action, hint); addI(ic, action, hint);
+    washer.add(shadowy(grp, true, false)); return grp;
+  };
+  SPEC.power.mesh = mkButton(SPEC.power, 'power', 'power', 'Power');
+  SPEC.start.mesh = mkButton(SPEC.start, 'start', 'start', 'Start / Pause');
+}
+
+// ---------------- dispenser drawer ----------------
+const drawerGroup = new THREE.Group(); washer.add(drawerGroup);
+const dispenserLiquids = {};
+{
+  const dr = SPEC.drawer;
+  const front = new THREE.Mesh(new RoundedBoxGeometry(dr.x1 - dr.x0, dr.y1 - dr.y0, 0.018, 4, 0.004), MAT.enamelPanel);
+  front.position.set((dr.x0 + dr.x1) / 2, (dr.y0 + dr.y1) / 2, 0.008); drawerGroup.add(shadowy(front));
+  addI(front, 'drawer', 'Detergent dispenser drawer');
+  const dw = 1024, dh = Math.round(1024 * (dr.y1 - dr.y0) / (dr.x1 - dr.x0));
+  const ppm = dw / (dr.x1 - dr.x0);
+  const decal = canvasTex(dw, dh, (c) => {
+    c.clearRect(0, 0, dw, dh);
+    const X = (x) => (x - dr.x0) * ppm, Y = (y) => (dr.y1 - y) * ppm;
+    // unbranded emblem
+    c.fillStyle = '#d6d8da'; c.beginPath(); c.arc(X(-0.306), Y(0.958), 0.0065 * ppm, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#56595e'; c.font = `${0.0042 * ppm}px "Segoe UI", Arial`; c.textBaseline = 'middle';
+    c.fillText('Inverter', X(-0.320), Y(0.9315));
+    c.font = `${0.0072 * ppm}px "Segoe UI", Arial`; c.fillText('Direct Drive', X(-0.320), Y(0.924));
+    // feature icons (HE, steam, allergy, wifi, turbo)
+    const ix = [-0.212, -0.199, -0.186, -0.173, -0.160];
+    ix.forEach((x, i) => {
+      c.strokeStyle = '#6a6d72'; c.lineWidth = 2; c.strokeRect(X(x) - 0.0055 * ppm, Y(0.928) - 0.0045 * ppm, 0.011 * ppm, 0.009 * ppm);
+      c.fillStyle = '#6a6d72'; c.font = `bold ${0.004 * ppm}px Arial`; c.textAlign = 'center'; c.fillText(['he', '≈', '△', '◠', '◎'][i], X(x), Y(0.928)); c.textAlign = 'left';
+    });
+    // handle groove + recess shading
+    const g1 = c.createLinearGradient(0, Y(0.917), 0, Y(0.872));
+    g1.addColorStop(0, 'rgba(60,62,66,0.85)'); g1.addColorStop(0.08, 'rgba(120,124,128,0.35)'); g1.addColorStop(1, 'rgba(200,203,206,0.18)');
+    c.fillStyle = g1; c.beginPath(); c.roundRect(X(-0.316), Y(0.917), 0.170 * ppm, 0.045 * ppm, 0.01 * ppm); c.fill();
+  });
+  const dm = new THREE.Mesh(new THREE.PlaneGeometry(dr.x1 - dr.x0, dr.y1 - dr.y0), new THREE.MeshStandardMaterial({ map: decal, transparent: true, roughness: 0.35, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }));
+  dm.position.set((dr.x0 + dr.x1) / 2, (dr.y0 + dr.y1) / 2, 0.0172); drawerGroup.add(dm); xrayHidden.push(dm);
+  addI(dm, 'drawer', 'Detergent dispenser drawer');
+  // drawer tray with 4 compartments: Pre-wash, Main (liquid cup), Bleach, Softener
+  const tray = new THREE.Group(); tray.position.set((dr.x0 + dr.x1) / 2, dr.y0 + 0.055, -0.20);
+  const trayMat = new THREE.MeshStandardMaterial({ color: 0xeef0f2, roughness: 0.45 });
+  const tb = new THREE.Mesh(new THREE.BoxGeometry(dr.x1 - dr.x0 - 0.01, 0.004, 0.38), trayMat); tb.position.y = -0.045; tray.add(tb);
+  const comps = [['prewash', -0.07, 0.06, 0xffffff], ['main', 0.0, 0.07, 0xf0f2ff], ['bleach', 0.065, 0.04, 0xffffff], ['softener', 0.065, 0.04, 0xffffff]];
+  const compX = { prewash: -0.065, main: 0.005, bleach: 0.072, softener: 0.072 }, compZ = { prewash: 0.05, main: 0.05, bleach: 0.11, softener: -0.01 };
+  for (const [name] of comps) {
+    const w = name === 'main' ? 0.07 : name === 'prewash' ? 0.06 : 0.045, dz = name === 'bleach' || name === 'softener' ? 0.055 : 0.17;
+    const walls = new THREE.Mesh(new THREE.BoxGeometry(w, 0.04, dz), new THREE.MeshStandardMaterial({ color: 0xf6f7f8, roughness: 0.4, transparent: true, opacity: 0.55, side: THREE.DoubleSide }));
+    walls.position.set(compX[name], -0.025, compZ[name]); tray.add(walls);
+    const liq = new THREE.Mesh(new THREE.BoxGeometry(w - 0.004, 1, dz - 0.004), new THREE.MeshPhysicalMaterial({
+      color: { prewash: 0x3a7bd5, main: 0x2e6be0, bleach: 0xe8f0ff, softener: 0xd38ad6 }[name], roughness: 0.1, transparent: true, opacity: 0.8 }));
+    liq.position.set(compX[name], -0.043, compZ[name]); liq.scale.y = 0.0001; tray.add(liq);
+    dispenserLiquids[name] = liq;
+  }
+  drawerGroup.add(tray);
+}
+
+// ---------------- door ----------------
+const doorPivot = new THREE.Group(); doorPivot.position.set(DC.hingeX, DC.cy, 0.012); washer.add(doorPivot);
+const doorGlassWet = { mat: null, fogMat: null };
+{
+  const door = new THREE.Group(); door.position.set(DC.cx - DC.hingeX, 0, 0); doorPivot.add(door);
+  const rim = lathe([[DC.R - 0.009, 0.0], [DC.R - 0.002, 0.004], [DC.R, 0.018], [DC.R - 0.003, 0.031], [DC.R - 0.009, 0.034]], 128, MAT.roseGold);
+  door.add(rim);
+  const ring = lathe([[DC.windowR, 0.0405], [DC.windowR + 0.01, 0.0402], [DC.R - 0.009, 0.0345], [DC.R - 0.009, 0.033]], 128, MAT.blackGloss);
+  door.add(ring);
+  const window = lathe([[0.0, 0.0415], [DC.windowR * 0.6, 0.0412], [DC.windowR + 0.001, 0.0405]], 96, MAT.tintedGlass);
+  door.add(window);
+  // inner glass bowl that protrudes into the gasket
+  const bowl = lathe([[DC.windowR - 0.004, 0.030], [0.198, 0.010], [0.183, -0.040], [0.165, -0.085], [0.13, -0.110], [0.06, -0.120], [0.0, -0.121]], 96, MAT.clearGlass);
+  door.add(bowl);
+  // condensation / splash film on the inside of the bowl
+  const dropsTex = canvasTex(512, 512, (c) => {
+    c.clearRect(0, 0, 512, 512);
+    for (let i = 0; i < 900; i++) {
+      const x = rand(0, 512), y = rand(0, 512), r = rand(1.5, 7);
+      const gr = c.createRadialGradient(x - r * 0.3, y - r * 0.3, 0, x, y, r);
+      gr.addColorStop(0, 'rgba(255,255,255,0.95)'); gr.addColorStop(0.6, 'rgba(220,235,245,0.5)'); gr.addColorStop(1, 'rgba(200,220,235,0)');
+      c.fillStyle = gr; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+    }
+  });
+  const dropsMat = new THREE.MeshStandardMaterial({ map: dropsTex, transparent: true, opacity: 0, roughness: 0.1, depthWrite: false });
+  const drops = new THREE.Mesh(new THREE.CircleGeometry(0.175, 48), dropsMat); drops.position.z = -0.1185; door.add(drops);
+  const fogMat = new THREE.MeshStandardMaterial({ color: 0xe8eef2, transparent: true, opacity: 0, roughness: 1, depthWrite: false });
+  const fog = new THREE.Mesh(new THREE.CircleGeometry(0.19, 48), fogMat); fog.position.z = -0.117; door.add(fog);
+  doorGlassWet.mat = dropsMat; doorGlassWet.fogMat = fogMat;
+  // grey inner frame, hinge and magnet plunger
+  const inner = lathe([[DC.windowR - 0.002, 0.03], [DC.R - 0.012, 0.0], [DC.R - 0.012, -0.004], [DC.windowR - 0.004, 0.026]], 96, MAT.doorPlastic);
+  door.add(inner);
+  const hinge = new THREE.Mesh(new RoundedBoxGeometry(0.03, 0.12, 0.03, 3, 0.006), MAT.steel); hinge.position.set(-(DC.cx - DC.hingeX) + 0.012, 0, -0.006); door.add(hinge);
+  const plunger = cyl(0.008, 0.008, 0.022, 16, MAT.plasticGrey); plunger.rotation.x = Math.PI / 2; plunger.position.set(DC.R - 0.03, -0.005, -0.012); door.add(plunger);
+  for (const m of [rim, ring, window, inner]) addI(m, 'door', 'Door');
+  shadowy(door, true, false);
+  window.castShadow = false; bowl.castShadow = false;
+}
+// door-latch receiver on the cabinet (right of the opening)
+{ const latch = new THREE.Mesh(new RoundedBoxGeometry(0.018, 0.036, 0.01, 2, 0.003), MAT.plasticDark); latch.position.set(0.272, DC.cy, 0.002); washer.add(latch); }
+
+// ---------------- drain-pump filter cover ----------------
+const drainCoverPivot = new THREE.Group();
+{
+  const dc = SPEC.drainCover;
+  drainCoverPivot.position.set((dc.x0 + dc.x1) / 2, dc.y0, 0.0); washer.add(drainCoverPivot);
+  const cover = new THREE.Mesh(new RoundedBoxGeometry(dc.x1 - dc.x0, dc.y1 - dc.y0, 0.006, 3, 0.006), MAT.enamelPanel);
+  cover.position.set(0, (dc.y1 - dc.y0) / 2, 0.0045); drainCoverPivot.add(cover);
+  const tab = new THREE.Mesh(new RoundedBoxGeometry(0.014, 0.006, 0.004, 2, 0.0015), MAT.plasticGrey); tab.position.set(0, dc.y1 - dc.y0 - 0.008, 0.005); drainCoverPivot.add(tab);
+  addI(cover, 'draincover', 'Drain-pump filter cover');
+  // filter cap + emergency drain tube behind it
+  const cap = cyl(0.026, 0.026, 0.02, 24, MAT.plasticWhite); cap.rotation.x = Math.PI / 2; cap.position.set(-0.17, 0.085, -0.004); washer.add(cap);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.008, 0.012), MAT.plasticWhite); grip.position.set(-0.17, 0.085, 0.006); washer.add(grip);
+  addI(cap, 'filter', 'Drain-pump filter'); addI(grip, 'filter', 'Drain-pump filter');
+  const tube = cyl(0.006, 0.006, 0.05, 12, MAT.darkRubber); tube.position.set(-0.255, 0.075, -0.003); washer.add(tube);
+  const opening = new THREE.Mesh(new THREE.PlaneGeometry(dc.x1 - dc.x0 - 0.006, dc.y1 - dc.y0 - 0.006), MAT.plasticDark);
+  opening.position.set((dc.x0 + dc.x1) / 2, (dc.y0 + dc.y1) / 2, -0.012); washer.add(opening);
+}
+
+// ---------------- gasket (door boot) ----------------
+const gasket = lathe([[SPEC.gasket.outerR + 0.006, -0.003], [SPEC.gasket.outerR, 0.003], [0.236, 0.001], [0.226, -0.016], [0.232, -0.040], [0.238, -0.058], [0.222, -0.074], [SPEC.gasket.innerR, -0.090], [SPEC.gasket.innerR, -0.105]], 128, MAT.rubber);
+gasket.position.set(DC.cx, DC.cy, 0); washer.add(gasket);
+// TurboWash 360° jet nozzles moulded into the boot
+const JET_ANGLES = [-Math.PI * 0.62, -Math.PI * 0.38, Math.PI * 0.80, Math.PI * 0.20];
+for (const a of JET_ANGLES) {
+  const n = new THREE.Mesh(new RoundedBoxGeometry(0.026, 0.012, 0.03, 2, 0.004), MAT.plasticGrey);
+  n.position.set(DC.cx + Math.cos(a) * 0.218, DC.cy + Math.sin(a) * 0.218, -0.05); n.rotation.z = a + Math.PI / 2; washer.add(n);
+}
+
+// ---------------- tub, drum & internals ----------------
+const tubBase = new THREE.Vector3(DC.cx, DC.cy, -0.105);
+const tubPivot = new THREE.Group(); tubPivot.position.copy(tubBase); tubPivot.rotation.x = -SPEC.tilt; washer.add(tubPivot);
+const drum = new THREE.Group(); tubPivot.add(drum);
+const waterFrame = new THREE.Group(); waterFrame.rotation.x = SPEC.tilt; tubPivot.add(waterFrame); // horizontal frame at tub front centre
+const DR = SPEC.drum, DRUM_BACK = DR.front - DR.depth;
+const LIFTERS = [Math.PI / 2, Math.PI / 2 + 2 * Math.PI / 3, Math.PI / 2 + 4 * Math.PI / 3];
+const LIFTER_HALF_BASE = 0.055, LIFTER_HALF_TOP = 0.024;
+const xrayOnly = [];
+{
+  const shell = new THREE.Mesh(new THREE.CylinderGeometry(DR.R, DR.R, DR.depth, 128, 1, true), MAT.drum);
+  shell.rotation.x = Math.PI / 2; shell.position.z = DR.front - DR.depth / 2; drum.add(shell);
+  const lip = new THREE.Mesh(new THREE.RingGeometry(DR.lipR, DR.R + 0.002, 128), MAT.steel); lip.position.z = DR.front; drum.add(lip);
+  const lipRoll = new THREE.Mesh(new THREE.TorusGeometry(DR.lipR, 0.006, 12, 128), MAT.steel); lipRoll.position.z = DR.front - 0.003; drum.add(lipRoll);
+  const back = new THREE.Mesh(new THREE.CircleGeometry(DR.R, 128), MAT.drumBack); back.position.z = DRUM_BACK; drum.add(back);
+  const hub = lathe([[0.0, 0.03], [0.03, 0.026], [0.048, 0.012], [0.052, 0.0]], 48, MAT.steel); hub.position.z = DRUM_BACK; drum.add(hub);
+  const hubRing = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.004, 8, 64), MAT.steel); hubRing.position.z = DRUM_BACK + 0.002; drum.add(hubRing);
+  // three stainless lifters
+  for (const th of LIFTERS) {
+    const s = new THREE.Shape(), h = DR.lifterH;
+    s.moveTo(-LIFTER_HALF_BASE, DR.R + 0.002); s.lineTo(-LIFTER_HALF_TOP - 0.008, DR.R - h + 0.012);
+    s.quadraticCurveTo(-LIFTER_HALF_TOP, DR.R - h, 0, DR.R - h - 0.002); s.quadraticCurveTo(LIFTER_HALF_TOP, DR.R - h, LIFTER_HALF_TOP + 0.008, DR.R - h + 0.012);
+    s.lineTo(LIFTER_HALF_BASE, DR.R + 0.002); s.closePath();
+    const g = new THREE.ExtrudeGeometry(s, { depth: DR.depth - 0.03, bevelEnabled: true, bevelThickness: 0.012, bevelSize: 0.006, bevelSegments: 4, curveSegments: 12 });
+    const m = new THREE.Mesh(g, MAT.lifter); m.rotation.z = th - Math.PI / 2; m.position.z = DRUM_BACK + 0.015; drum.add(m);
+  }
+  // tub: outer shell (x-ray), dark inner skin that shows through the perforations
+  const tubOuter = new THREE.Mesh(new THREE.CylinderGeometry(SPEC.tub.R, SPEC.tub.R, SPEC.tub.len, 96, 1, true), MAT.tub);
+  tubOuter.rotation.x = Math.PI / 2; tubOuter.position.z = -0.015 - SPEC.tub.len / 2; tubPivot.add(tubOuter); xrayOnly.push(tubOuter);
+  const tubInner = new THREE.Mesh(new THREE.CylinderGeometry(SPEC.tub.R - 0.004, SPEC.tub.R - 0.004, SPEC.tub.len, 64, 1, true), MAT.tubInside);
+  tubInner.rotation.x = Math.PI / 2; tubInner.position.z = -0.015 - SPEC.tub.len / 2; tubPivot.add(tubInner);
+  const tubBack = new THREE.Mesh(new THREE.CircleGeometry(SPEC.tub.R, 96), MAT.tub); tubBack.position.z = -0.015 - SPEC.tub.len; tubBack.rotation.y = Math.PI; tubPivot.add(tubBack); xrayOnly.push(tubBack);
+  const tubBackIn = new THREE.Mesh(new THREE.CircleGeometry(SPEC.tub.R, 64), new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.9 })); tubBackIn.position.z = -0.012 - SPEC.tub.len; tubPivot.add(tubBackIn);
+  const tubFront = new THREE.Mesh(new THREE.RingGeometry(SPEC.gasket.innerR, SPEC.tub.R, 96), MAT.tub); tubFront.position.z = -0.012; tubPivot.add(tubFront); xrayOnly.push(tubFront);
+  // direct-drive motor: outer rotor (12 magnets) around a 36-pole stator
+  const rotor = new THREE.Group(); rotor.position.z = -0.015 - SPEC.tub.len - 0.035;
+  const rotorCup = cyl(0.155, 0.155, 0.055, 48, MAT.plasticDark); rotorCup.rotation.x = Math.PI / 2; rotor.add(rotorCup);
+  for (let i = 0; i < 12; i++) { const fin = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.11, 0.02), MAT.plasticGrey); const a = i / 12 * Math.PI * 2; fin.position.set(Math.cos(a) * 0.09, Math.sin(a) * 0.09, -0.03); fin.rotation.z = a + Math.PI / 2; rotor.add(fin); }
+  const stator = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.016, 12, 36), MAT.copper); stator.position.z = 0.012; rotor.add(stator);
+  tubPivot.add(rotor); xrayOnly.push(rotor); drum.userData.rotor = rotor;
+  // heater (1100 W) under the drum, counterweights, sump
+  const heaterCurve = new THREE.CatmullRomCurve3([new THREE.Vector3(-0.05, -0.300, -0.05), new THREE.Vector3(-0.05, -0.302, -0.40), new THREE.Vector3(0, -0.303, -0.43), new THREE.Vector3(0.05, -0.302, -0.40), new THREE.Vector3(0.05, -0.300, -0.05)]);
+  const heater = new THREE.Mesh(new THREE.TubeGeometry(heaterCurve, 40, 0.005, 8), MAT.steel); tubPivot.add(heater); xrayOnly.push(heater);
+  const heaterGlowMat = new THREE.MeshBasicMaterial({ color: 0xff5a1f, transparent: true, opacity: 0 });
+  const heaterGlow = new THREE.Mesh(new THREE.TubeGeometry(heaterCurve, 40, 0.0065, 8), heaterGlowMat); tubPivot.add(heaterGlow); drum.userData.heaterGlow = heaterGlowMat;
+  const cw1 = new THREE.Mesh(new RoundedBoxGeometry(0.42, 0.07, 0.07, 3, 0.012), MAT.concrete); cw1.position.set(0, SPEC.tub.R + 0.02, -0.06); tubPivot.add(cw1); xrayOnly.push(cw1);
+  const cw2 = new THREE.Mesh(new RoundedBoxGeometry(0.30, 0.06, 0.07, 3, 0.012), MAT.concrete); cw2.position.set(0, -SPEC.tub.R - 0.02, -0.07); tubPivot.add(cw2); xrayOnly.push(cw2);
+  const sump = new THREE.Mesh(new RoundedBoxGeometry(0.12, 0.06, 0.12, 2, 0.01), MAT.tub); sump.position.set(0, -SPEC.tub.R - 0.03, -0.25); tubPivot.add(sump); xrayOnly.push(sump);
+}
+// suspension: two top springs, three bottom friction dampers (per exploded view)
+const springGeo = (() => {
+  const pts = []; const turns = 14;
+  for (let i = 0; i <= 400; i++) { const t = i / 400; const a = t * turns * Math.PI * 2; pts.push(new THREE.Vector3(Math.cos(a) * 0.012, t, Math.sin(a) * 0.012)); }
+  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 400, 0.0022, 6);
+})();
+const SUSP = { springs: [], dampers: [] };
+for (const sx of [-1, 1]) {
+  const m = new THREE.Mesh(springGeo, MAT.spring); washer.add(m); xrayOnly.push(m);
+  SUSP.springs.push({ mesh: m, tubLocal: new THREE.Vector3(sx * 0.17, SPEC.tub.R + 0.01, -0.28), cab: new THREE.Vector3(sx * 0.26, 0.955, -0.30 - 0.105) });
+}
+for (const [x, z] of [[-0.16, -0.18], [0.16, -0.18], [0, -0.42]]) {
+  const body = cyl(0.016, 0.016, 1, 16, MAT.plasticDark); const rod = cyl(0.006, 0.006, 1, 12, MAT.steel);
+  washer.add(body, rod); xrayOnly.push(body, rod);
+  SUSP.dampers.push({ body, rod, tubLocal: new THREE.Vector3(x, -SPEC.tub.R - 0.01, z), cab: new THREE.Vector3(x * 1.2, 0.05, z - 0.105) });
+}
+// drain pump, hoses, inlet valve, pressure sensor, PCB (visible in x-ray)
+const plumbing = new THREE.Group(); washer.add(plumbing);
+const pumpGroup = new THREE.Group(); pumpGroup.position.set(-0.17, 0.085, -0.10); plumbing.add(pumpGroup); xrayOnly.push(pumpGroup);
+{
+  const body = cyl(0.04, 0.04, 0.09, 24, MAT.plasticGrey); body.rotation.x = Math.PI / 2; pumpGroup.add(body);
+  const motor = cyl(0.03, 0.03, 0.06, 20, MAT.plasticDark); motor.rotation.z = Math.PI / 2; motor.position.set(0.06, 0, -0.03); pumpGroup.add(motor);
+  const mk = (pts, r, mat) => { const m = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, r, 10), mat); plumbing.add(m); xrayOnly.push(m); return m; };
+  mk([new THREE.Vector3(0, 0.205, -0.36), new THREE.Vector3(-0.05, 0.15, -0.30), new THREE.Vector3(-0.15, 0.10, -0.18), new THREE.Vector3(-0.17, 0.09, -0.14)], 0.018, MAT.hose);
+  mk([new THREE.Vector3(-0.17, 0.10, -0.15), new THREE.Vector3(-0.05, 0.16, -0.35), new THREE.Vector3(0.20, 0.45, -0.62), new THREE.Vector3(0.25, 0.80, -0.69), new THREE.Vector3(0.26, 0.85, -0.70)], 0.012, MAT.hose);
+  // circulation (TurboWash) hose to the boot
+  mk([new THREE.Vector3(-0.12, 0.10, -0.12), new THREE.Vector3(-0.27, 0.30, -0.10), new THREE.Vector3(-0.25, 0.70, -0.10), new THREE.Vector3(-0.15, 0.80, -0.08)], 0.008, MAT.hose);
+  const valve = new THREE.Mesh(new RoundedBoxGeometry(0.11, 0.05, 0.06, 2, 0.01), MAT.plasticWhite); valve.position.set(0.17, 0.905, -0.66); plumbing.add(valve); xrayOnly.push(valve);
+  for (const x of [0.13, 0.17, 0.21]) { const coil = cyl(0.012, 0.012, 0.03, 16, MAT.copper); coil.position.set(x, 0.94, -0.66); plumbing.add(coil); xrayOnly.push(coil); }
+  mk([new THREE.Vector3(0.17, 0.91, -0.63), new THREE.Vector3(0.0, 0.93, -0.45), new THREE.Vector3(-0.2, 0.92, -0.25), new THREE.Vector3(-0.23, 0.90, -0.12)], 0.012, MAT.hose);
+  const ps = cyl(0.03, 0.03, 0.02, 24, MAT.plasticWhite); ps.position.set(-0.26, 0.93, -0.55); plumbing.add(ps); xrayOnly.push(ps);
+  mk([new THREE.Vector3(-0.26, 0.92, -0.55), new THREE.Vector3(-0.29, 0.6, -0.5), new THREE.Vector3(-0.2, 0.2, -0.4), new THREE.Vector3(-0.05, 0.19, -0.37)], 0.003, MAT.plasticDark);
+  const pcb = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.08, 0.02), MAT.pcb); pcb.position.set(-0.05, 0.93, -0.66); plumbing.add(pcb); xrayOnly.push(pcb);
+}
+xrayOnly.forEach(o => o.traverse(m => { if (m.isMesh) m.visible = false; }));
+// external hoses: inlet hoses from faucets, drain hose into the standpipe
+let drainHoseMesh = null;
+const extHoses = new THREE.Group(); scene.add(extHoses);
+function buildExternalHoses(heightIn) {
+  if (drainHoseMesh) { extHoses.remove(drainHoseMesh); drainHoseMesh.geometry.dispose(); }
+  const h = heightIn * IN;
+  const pts = [new THREE.Vector3(0.26, 0.85, -D - 0.005), new THREE.Vector3(0.28, 0.25, -D - 0.06), new THREE.Vector3(0.30, 0.10, -D - 0.07),
+    new THREE.Vector3(0.31, Math.max(0.2, h * 0.5), -D - 0.075), new THREE.Vector3(0.32, h + 0.06, -0.785), new THREE.Vector3(0.32, h - 0.02, -0.79)];
+  drainHoseMesh = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 80, 0.012, 10), MAT.hose); drainHoseMesh.castShadow = true;
+  extHoses.add(drainHoseMesh);
+}
+{
+  for (const [x0, x1] of [[0.13, 0.13], [0.23, 0.215]]) {
+    const c = new THREE.CatmullRomCurve3([new THREE.Vector3(x0, 1.19, -0.75), new THREE.Vector3(x0, 1.05, -0.74), new THREE.Vector3((x0 + x1) / 2, 0.93, -0.75), new THREE.Vector3(x1, 0.905, -D - 0.03)]);
+    const m = new THREE.Mesh(new THREE.TubeGeometry(c, 40, 0.009, 10), MAT.inletHose); m.castShadow = true; extHoses.add(m);
+  }
+  const cord = new THREE.CatmullRomCurve3([new THREE.Vector3(-0.2, 0.7, -D - 0.005), new THREE.Vector3(-0.25, 0.4, -D - 0.05), new THREE.Vector3(-0.35, 0.3, -0.79), new THREE.Vector3(-0.4, 0.32, -0.81)]);
+  extHoses.add(new THREE.Mesh(new THREE.TubeGeometry(cord, 30, 0.004, 8), MAT.inletHose));
+  buildExternalHoses(36);
+}
+// ============================================================================
+// PLANT — physical model of the machine
+// ============================================================================
+// ---- tub water volume ↔ level (horizontal "level frame" at tub front centre) ----
+const CT = Math.cos(SPEC.tilt), ST = Math.sin(SPEC.tilt);
+const TUB_FRONT = 0.015, TUB_BACK = 0.015 + SPEC.tub.len;           // axial distances
+const Y_LOW = -TUB_BACK * ST - SPEC.tub.R;                            // lowest point of tub
+const Y_SUMP = Y_LOW - SPEC.tub.sumpDepth;                            // bottom of sump (sensor air-trap)
+function segArea(h, R) { if (h <= 0) return 0; if (h >= 2 * R) return Math.PI * R * R; const d = R - h; return R * R * Math.acos(d / R) - d * Math.sqrt(2 * R * h - h * h); }
+const LEVEL_TABLE = (() => {
+  const out = []; const R = SPEC.tub.R / CT; // slice is an ellipse-ish; use R/cosθ vertical semi-axis (small)
+  for (let y = Y_SUMP; y <= 0.32; y += 0.001) {
+    let V = SPEC.tub.sumpL / 1000 * clamp((y - Y_SUMP) / SPEC.tub.sumpDepth, 0, 1);
+    const n = 60, da = (TUB_BACK - TUB_FRONT) / n;
+    for (let i = 0; i < n; i++) { const a = TUB_FRONT + (i + 0.5) * da; const yc = -a * ST; V += segArea(y - (yc - R), R) * CT * da; }
+    out.push([y, V * 1000]);
+  }
+  return out;
+})();
+function levelFromVolume(L) {
+  let lo = 0, hi = LEVEL_TABLE.length - 1;
+  if (L <= 0) return Y_SUMP;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (LEVEL_TABLE[mid][1] < L) lo = mid; else hi = mid; }
+  const [y0, v0] = LEVEL_TABLE[lo], [y1, v1] = LEVEL_TABLE[hi];
+  return y0 + (y1 - y0) * clamp((L - v0) / Math.max(1e-6, v1 - v0), 0, 1);
+}
+const freqToHeadMm = (f) => (SPEC.freqEmpty - f) / SPEC.freqPerMm;
+const volumeAtFreq = (f) => { const y = Y_SUMP + freqToHeadMm(f) / 1000; let lo = 0; while (lo < LEVEL_TABLE.length - 1 && LEVEL_TABLE[lo][0] < y) lo++; return LEVEL_TABLE[lo][1]; };
+
+const plant = {
+  powered: true,
+  supply: { cold: true, hot: true, psi: 60, hotT: 49, coldT: 13 },
+  drain: { heightIn: 36, kink: false, clog: false, primed: false },
+  faults: { therm: false, press: false, motor: false, doorsw: false, valve: false, vib: false, level: false },
+  valves: { pre: false, main: false, hot: false, bleach: false }, softPath: false,
+  pumpOn: false, circOn: false, heaterCmd: false, heaterOn: false,
+  V: 0, T: 20, Tamb: 21, det: 0, bleach: 0, soft: 0, soil: 0, suds: 0, agitation: 0,
+  dispenser: { prewash: 0, main: 0, bleach: 0, softener: 0 }, he: true,
+  inflow: 0, outflow: 0, waterUsed: 0, energyWh: 0,
+  // drive
+  omega: 0, omegaRef: 0, target: 0, accel: 3, mode: 'coast', integ: 0, torque: 0, power: 0, brakeT: 6,
+  J0: 1.05, Jload: 0, tauLoad: 0, alpha: 0,
+  // sensors
+  freq: SPEC.freqEmpty, thermistor: 20, vibG: 0,
+  // door
+  doorClosed: true, doorLocked: false, lockCmd: false, lockTimer: 0, unpoweredTimer: 0,
+  // suspension (real-time)
+  tub: { x: 0, y: 0, vx: 0, vy: 0, amp: 0, ax: 0, ay: 0 }, cab: { x: 0, y: 0, walkX: 0, walkZ: 0, rock: 0 },
+  head: 0, level: Y_SUMP, sudsHead: 0,
+};
+
+function valveFlowLpm(faucetOpen) {
+  if (!faucetOpen || plant.supply.psi <= 0) return 0;
+  return 8.3 * Math.sqrt(plant.supply.psi / 60);   // flow-washer limited valve ~2.2 gpm @ 60 psi
+}
+function pumpFlowLpm() {
+  const liftM = plant.drain.heightIn * IN - 0.18;    // static head above the water in the sump
+  let q = 27 * Math.max(0, 1 - (liftM / 2.75) ** 2);  // 40 W synchronous pump curve
+  if (plant.drain.clog) q *= 0.08;
+  if (plant.drain.kink) q *= 0.03;
+  return q;
+}
+
+// Garments live in the cloth module; the plant only needs their water bookkeeping.
+const laundry = { items: [] };
+
+function plantStep(dt) {
+  const p = plant;
+  // ---------------- water in ----------------
+  const powered = p.powered;
+  const qCold = valveFlowLpm(p.supply.cold), qHot = valveFlowLpm(p.supply.hot);
+  const flows = {
+    pre: powered && p.valves.pre ? qCold : 0,
+    main: (powered && p.valves.main) || p.faults.valve ? qCold : 0,
+    hot: powered && p.valves.hot ? qHot : 0,
+    bleach: powered && p.valves.bleach ? qCold : 0,
+  };
+  let inL = 0, heatIn = 0;
+  for (const [k, q] of Object.entries(flows)) {
+    if (q <= 0) continue;
+    const L = q / 60 * dt; inL += L;
+    heatIn += L * (k === 'hot' ? p.supply.hotT : p.supply.coldT);
+    // which compartment this valve flushes
+    const comp = k === 'pre' ? 'prewash' : k === 'bleach' ? 'bleach' : (p.softPath ? 'softener' : 'main');
+    const amt = p.dispenser[comp];
+    if (amt > 0) {
+      const out = amt * (1 - Math.exp(-L / 0.7));
+      p.dispenser[comp] -= out;
+      if (comp === 'main' || comp === 'prewash') p.det += out; else if (comp === 'bleach') p.bleach += out; else p.soft += out;
+    }
+  }
+  if (inL > 0) { p.T = (p.T * (p.V + heldWater()) + heatIn) / (p.V + heldWater() + inL); }
+  p.V += inL; p.waterUsed += inL; p.inflow = inL / dt * 60;
+
+  // ---------------- water out ----------------
+  let outL = 0;
+  if (powered && p.pumpOn) { outL += pumpFlowLpm() / 60 * dt; p.drain.primed = true; }
+  const hoseM = p.drain.heightIn * IN;
+  if (p.drain.primed && hoseM < 29.5 * IN && !p.drain.kink) outL += 5 * (29.5 * IN - hoseM) / (29.5 * IN) / 60 * dt; // siphoning
+  outL = Math.min(outL, p.V);
+  if (p.V > 1e-6 && outL > 0) {
+    const f = outL / p.V;
+    p.det *= 1 - f; p.bleach *= 1 - f; p.soft *= 1 - f; p.soil *= 1 - f; p.suds *= Math.exp(-0.012 * outL); // foam mostly stays behind when the liquor drains
+  }
+  p.V -= outL; p.outflow = outL / dt * 60;
+  p.pumpDry = p.pumpOn && p.V < 0.3;
+
+  // ---------------- fabric absorption / extraction ----------------
+  const g = p.omega * p.omega * SPEC.drum.R / 9.81;
+  for (const it of laundry.items) {
+    const sat = it.dry * it.absorb;
+    let wetting = it.submerged + (p.circOn ? 0.5 : 0) + (p.V > 0.8 && g < 1 ? 0.15 * p.agitation : 0);
+    wetting = clamp(wetting, 0, 1.5);
+    if (it.water < sat && p.V > 0.02 && wetting > 0) {
+      const dw = Math.min(p.V - 0.02, (sat - it.water) * 0.03 * wetting * dt);
+      it.water += dw; p.V -= dw;
+    }
+    if (g > 1.2) {
+      const eq = it.dry * Math.min(it.absorb, 0.30 + 5.0 / Math.sqrt(g));
+      if (it.water > eq) { const dw = (it.water - eq) * (0.004 + 0.00012 * g) * dt; it.water -= dw; p.V += dw; }
+    }
+    if (it.water > sat * 1.05) { const dw = it.water - sat * 1.05; it.water -= dw; p.V += dw; }
+    // soil removal: mechanical action × temperature × detergent × wetness
+    const conc = p.det / Math.max(1, p.V + heldWater());
+    const mech = p.agitation * (g < 1 ? 1 : 0.15) + (p.circOn ? 0.35 : 0);
+    const k = 0.0011 * mech * (1 + 0.035 * (p.T - 20)) * (0.25 + conc / (conc + 1.2)) * clamp(it.water / sat, 0, 1) * (1 + 0.3 * (p.bleach > 5));
+    const ds = it.soil * k * dt; it.soil -= ds; p.soil += ds * it.soilMass;
+    // detergent residue tracks the liquor the fabric is holding
+    it.residue = smooth(it.residue, conc * it.water, 0.02, dt);
+  }
+
+  // ---------------- heat ----------------
+  const level = levelFromVolume(p.V); p.level = level;
+  const headMm = (level - Y_SUMP) * 1000;
+  const heaterCovered = headMm > 70;
+  p.heaterOn = powered && p.heaterCmd && heaterCovered && !p.faults.therm;
+  const C = 4186 * (p.V + heldWater()) + 1300 * laundry.items.reduce((s, i) => s + i.dry, 0) + 6000;
+  p.T += ((p.heaterOn ? SPEC.heaterW : 0) - 6.5 * (p.T - p.Tamb)) / C * dt;
+  // thermistor: first-order lag, open circuit reads as −40 °C
+  p.thermistor = p.faults.therm ? -40 : smooth(p.thermistor, p.T, 1 / 18, dt);
+
+  // ---------------- suds ----------------
+  const concDet = p.det / Math.max(1, p.V + heldWater());
+  const gen = concDet * p.agitation * (p.he ? 0.0008 : 0.006) * (p.V > 1 ? 1 : 0.2);
+  p.suds = clamp(p.suds + gen * dt - (g > 8 ? 0.006 : 0.0016) * p.suds * dt - (inL > 0 ? p.suds * inL * 0.03 : 0), 0, 6); // foam can't exceed the free drum volume
+
+  // ---------------- pressure sensor (air-trap hydrostatic head → LC oscillator) ----------------
+  p.sudsHead = g > 8 ? Math.min(300, p.suds * 150) : Math.min(40, p.suds * 5); // foam forced into the sump/air-trap while spinning
+  p.head = headMm;
+  const fTrue = SPEC.freqEmpty - SPEC.freqPerMm * (headMm + p.sudsHead) + (Math.random() - 0.5) * 0.006;
+  p.freq = p.faults.press ? 8.4 : clamp(fTrue, 17, SPEC.freqEmpty + 0.05);
+
+  // ---------------- drive (BLDC, sensorless speed loop) ----------------
+  const motorSteps = Math.ceil(dt / 0.004), mdt = dt / motorSteps;
+  let eWh = 0;
+  for (let i = 0; i < motorSteps; i++) {
+    const w = p.omega, aw = Math.abs(w);
+    const J = p.J0 + p.Jload;
+    let tauF = 0.55 + 0.006 * aw + 3.0e-5 * aw * aw + 0.0035 * p.V * aw;
+    tauF *= Math.sign(w) || 0;
+    if (aw < 0.05 && Math.abs(tauF) > 0) tauF = 0;
+    let tm = 0;
+    const tmax = Math.min(SPEC.motor.Tmax, SPEC.motor.Pmax / Math.max(1, aw));
+    if (powered && !p.faults.motor) {
+      if (p.mode === 'speed') {
+        const dRef = p.target - p.omegaRef, step = p.accel * mdt;
+        p.omegaRef += clamp(dRef, -step, step);
+        const err = p.omegaRef - w;
+        p.integ = clamp(p.integ + err * mdt * 18, -tmax, tmax);
+        tm = clamp(err * 14 + p.integ + p.alpha * 0, -tmax, tmax);
+      } else if (p.mode === 'brake') {
+        tm = -Math.sign(w) * Math.min(p.brakeT, aw * 20);
+        p.omegaRef = w; p.integ = 0;
+      } else { p.omegaRef = w; p.integ = 0; }
+    } else { p.omegaRef = w; p.integ = 0; }
+    const tauNet = tm - tauF + (aw > 0.01 || Math.abs(p.tauLoad) > Math.abs(tm) ? p.tauLoad : 0);
+    let acc = tauNet / J;
+    let nw = w + acc * mdt;
+    if (p.mode !== 'speed' && Math.sign(nw) !== Math.sign(w) && w !== 0) nw = 0; // friction/brake can't reverse
+    p.alpha = (nw - w) / mdt; p.omega = nw; p.torque = tm;
+    eWh += (Math.abs(tm * w) / 0.82 + (tm !== 0 ? 6 : 0)) * mdt / 3600;
+  }
+  p.power = Math.abs(p.torque * p.omega) / 0.82 + (p.torque !== 0 ? 6 : 0);
+  p.energyWh += eWh + ((p.heaterOn ? SPEC.heaterW : 0) + (p.pumpOn ? SPEC.drainPumpW : 0) + (p.circOn ? 30 : 0) + (powered ? 3 : 0)) * dt / 3600;
+
+  // ---------------- door lock (PTC + solenoid) ----------------
+  if (!powered) { p.unpoweredTimer += dt; if (p.unpoweredTimer > 300) p.doorLocked = false; } else p.unpoweredTimer = 0;
+  if (powered) {
+    if (p.lockCmd && !p.doorLocked && p.doorClosed) { p.lockTimer += dt; if (p.lockTimer > 1.2) { p.doorLocked = true; p.lockTimer = 0; audio.click(); } }
+    else if (!p.lockCmd && p.doorLocked) { p.lockTimer += dt; if (p.lockTimer > 2.5) { p.doorLocked = false; p.lockTimer = 0; audio.click(); } }
+    else p.lockTimer = 0;
+  }
+  p.agitation = smooth(p.agitation, 0, 0.2, dt);
+}
+function heldWater() { let s = 0; for (const it of laundry.items) s += it.water; return s; }
+
+// ---- suspension: tub on 2 springs + 3 friction dampers, driven by the rotating imbalance ----
+const SUS = { M: 38, k: 38 * (2 * Math.PI * 3.4) ** 2, c: 2 * 0.32 * Math.sqrt(38 * 38 * (2 * Math.PI * 3.4) ** 2) };
+function suspensionStep(dt, Ux, Uy, phi) {
+  const p = plant, t = p.tub, w = p.omega;
+  const n = Math.max(1, Math.ceil(dt / (0.25 / Math.max(6, Math.abs(w))) ));
+  const h = dt / Math.min(n, 60);
+  let peak = 0;
+  for (let i = 0; i < Math.min(n, 60); i++) {
+    const ang = phi + w * h * i;
+    const ux = Ux * Math.cos(ang) - Uy * Math.sin(ang), uy = Ux * Math.sin(ang) + Uy * Math.cos(ang);
+    const Fx = ux * w * w, Fy = uy * w * w;
+    const axx = (Fx - SUS.k * t.x - SUS.c * t.vx) / SUS.M, ayy = (Fy - SUS.k * t.y - SUS.c * t.vy) / SUS.M;
+    t.vx += axx * h; t.vy += ayy * h; t.x += t.vx * h; t.y += t.vy * h;
+    t.ax = axx; t.ay = ayy;
+    peak = Math.max(peak, Math.hypot(t.x, t.y));
+  }
+  t.amp = Math.max(peak, t.amp * Math.exp(-dt * 2));
+  p.vibG = Math.hypot(t.ax, t.ay) / 9.81;
+  // force transmitted into the cabinet → cabinet shake and walking
+  const Ftx = SUS.k * t.x + SUS.c * t.vx, Fty = SUS.k * t.y + SUS.c * t.vy;
+  const kc = p.faults.level ? 4.0e4 : 3.5e5;
+  p.cab.x = Ftx / kc; p.cab.y = Fty / kc * 0.4;
+  p.cab.rock = p.faults.level ? clamp(Fty / 6000, -0.02, 0.02) : 0;
+  const mu = 0.55 * (85 + SUS.M) * 9.81;
+  if (Math.abs(Ftx) > mu) p.cab.walkX += Math.sign(Ftx) * (Math.abs(Ftx) - mu) * 2e-7;
+  if (Math.abs(Fty) > mu * 1.4) p.cab.walkZ += (Math.abs(Fty) - mu * 1.4) * 1.2e-7;
+  // tub hitting the cabinet: ~22 mm radial clearance
+  if (t.amp > 0.022) { t.x *= 0.022 / t.amp; t.y *= 0.022 / t.amp; if (Math.random() < 0.3) audio.thump(2); }
+}
+// ============================================================================
+// LAUNDRY — mass-spring cloth in the rotating drum frame
+// ============================================================================
+const GARMENTS = {
+  'T-shirt':   { w: 0.48, h: 0.56, nx: 7, ny: 8, dry: 0.18, absorb: 2.0, r: 0.022, soilMass: 3, colors: ['#e8e4dc', '#2b4c7e', '#a83a3a', '#3f6b43', '#d9a441'], pattern: ['plain', 'print', 'stripes'], fabric: 'cotton' },
+  'Jeans':     { w: 0.40, h: 0.92, nx: 6, ny: 11, dry: 0.68, absorb: 1.4, r: 0.026, soilMass: 8, colors: ['#3b5a8a', '#2a3d5c', '#4f6f9f'], pattern: ['denim'], fabric: 'denim' },
+  'Bath towel':{ w: 0.52, h: 0.74, nx: 7, ny: 9, dry: 0.55, absorb: 2.7, r: 0.030, soilMass: 4, colors: ['#f2efe9', '#7fb3c9', '#c98f8f', '#e8d9a6'], pattern: ['terry'], fabric: 'towel' },
+  'Bed sheet': { w: 0.84, h: 0.96, nx: 10, ny: 11, dry: 0.62, absorb: 1.9, r: 0.020, soilMass: 5, colors: ['#f4f4f6', '#cdd8e8', '#ead9d0'], pattern: ['plain', 'check'], fabric: 'cotton' },
+  'Hoodie':    { w: 0.56, h: 0.66, nx: 7, ny: 8, dry: 0.62, absorb: 2.2, r: 0.028, soilMass: 5, colors: ['#5d5f63', '#7a2f3b', '#2d3b2f'], pattern: ['plain'], fabric: 'cotton' },
+  'Blouse':    { w: 0.46, h: 0.58, nx: 7, ny: 8, dry: 0.12, absorb: 1.1, r: 0.018, soilMass: 1.5, colors: ['#f6e7ef', '#d7e9f7', '#ffffff'], pattern: ['plain', 'print'], fabric: 'synthetic' },
+  'Socks':     { w: 0.10, h: 0.24, nx: 2, ny: 4, dry: 0.05, absorb: 2.0, r: 0.02, soilMass: 1.5, colors: ['#222222', '#ffffff', '#8a8a8a'], pattern: ['plain'], fabric: 'cotton' },
+  'Bath mat':  { w: 0.42, h: 0.60, nx: 5, ny: 7, dry: 1.35, absorb: 2.0, r: 0.034, soilMass: 10, colors: ['#5b6f8a', '#8a6a5b'], pattern: ['terry'], fabric: 'towel', stiff: 1 },
+};
+const cloth = {
+  n: 0, pos: new Float32Array(0), prev: new Float32Array(0), rad: new Float32Array(0), gid: new Int16Array(0), gix: new Int16Array(0), giy: new Int16Array(0),
+  cons: [], dirty: true, contact: new Uint8Array(0),
+};
+let garmentSeq = 0;
+function addGarment(type) {
+  const T = GARMENTS[type];
+  const color = T.colors[Math.floor(Math.random() * T.colors.length)];
+  const pattern = T.pattern[Math.floor(Math.random() * T.pattern.length)];
+  const nx = T.nx, ny = T.ny, sx = T.w / (nx - 1), sy = T.h / (ny - 1);
+  const it = { id: ++garmentSeq, type, dry: T.dry, absorb: T.absorb, water: 0, soil: 0, soilMass: T.soilMass, residue: 0, submerged: 0, nx, ny, r: T.r, fabric: T.fabric, color,
+    soilInit: 0, start: 0, count: nx * ny, rest: [], relax: 0 };
+  // spawn crumpled near the opening, in the drum frame
+  const phi = drumState.phi;
+  const cx = rand(-0.06, 0.06), cy = rand(0.0, 0.12), cz = DR.front - 0.12 - Math.random() * 0.1;
+  const c = new THREE.Vector3(cx * Math.cos(-phi) - cy * Math.sin(-phi), cx * Math.sin(-phi) + cy * Math.cos(-phi), cz);
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)));
+  const squash = Math.min(1, 0.22 / Math.max(T.w, T.h));
+  const pts = [];
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = new THREE.Vector3((i - (nx - 1) / 2) * sx * squash, (j - (ny - 1) / 2) * sy * squash, Math.sin(i * 1.7 + j) * 0.02).applyQuaternion(q).add(c);
+    const rr = Math.hypot(v.x, v.y); if (rr > DR.R - 0.06) { v.x *= (DR.R - 0.06) / rr; v.y *= (DR.R - 0.06) / rr; }
+    v.z = clamp(v.z, DRUM_BACK + 0.05, DR.front - 0.05);
+    pts.push(v);
+  }
+  it.pts0 = pts; it.sx = sx; it.sy = sy;
+  // visuals
+  const UP = 3; it.up = UP; it.fx = (nx - 1) * UP + 1; it.fy = (ny - 1) * UP + 1;
+  const geo = new THREE.PlaneGeometry(1, 1, it.fx - 1, it.fy - 1);
+  const tex = fabricTex(color, pattern);
+  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.92, metalness: 0, side: THREE.DoubleSide, color: 0xffffff });
+  it.mat = mat; it.mesh = new THREE.Mesh(geo, mat); it.mesh.castShadow = false; it.mesh.receiveShadow = true; it.mesh.frustumCulled = false;
+  drum.add(it.mesh);
+  laundry.items.push(it);
+  rebuildCloth();
+  return it;
+}
+function removeAllGarments() {
+  for (const it of laundry.items) { drum.remove(it.mesh); it.mesh.geometry.dispose(); it.mat.map.dispose(); it.mat.dispose(); }
+  laundry.items.length = 0; rebuildCloth();
+}
+function rebuildCloth() {
+  // keep existing particle state, append new garments
+  const old = cloth;
+  let n = 0; for (const it of laundry.items) n += it.count;
+  const pos = new Float32Array(n * 3), prev = new Float32Array(n * 3), rad = new Float32Array(n), gid = new Int16Array(n), gix = new Int16Array(n), giy = new Int16Array(n);
+  const cons = []; let k = 0;
+  laundry.items.forEach((it, gi) => {
+    const hadState = it.start >= 0 && it.placed;
+    for (let j = 0; j < it.ny; j++) for (let i = 0; i < it.nx; i++) {
+      const idx = k + j * it.nx + i;
+      if (hadState) { const o = (it.start + j * it.nx + i) * 3; pos.set(old.pos.subarray(o, o + 3), idx * 3); prev.set(old.prev.subarray(o, o + 3), idx * 3); }
+      else { const v = it.pts0[j * it.nx + i]; pos[idx * 3] = prev[idx * 3] = v.x; pos[idx * 3 + 1] = prev[idx * 3 + 1] = v.y; pos[idx * 3 + 2] = prev[idx * 3 + 2] = v.z; }
+      rad[idx] = it.r; gid[idx] = gi; gix[idx] = i; giy[idx] = j;
+    }
+    const at = (i, j) => k + j * it.nx + i;
+    const stiff = GARMENTS[it.type].stiff ? 1 : 0.9;
+    const addC = (a, b, rest, s) => cons.push([a, b, rest, s, rest]);
+    for (let j = 0; j < it.ny; j++) for (let i = 0; i < it.nx; i++) {
+      if (i < it.nx - 1) addC(at(i, j), at(i + 1, j), it.sx, stiff);
+      if (j < it.ny - 1) addC(at(i, j), at(i, j + 1), it.sy, stiff);
+      if (i < it.nx - 1 && j < it.ny - 1) { const dd = Math.hypot(it.sx, it.sy); addC(at(i, j), at(i + 1, j + 1), dd, 0.5); addC(at(i + 1, j), at(i, j + 1), dd, 0.5); }
+      if (i < it.nx - 2) addC(at(i, j), at(i + 2, j), it.sx * 2, GARMENTS[it.type].stiff ? 0.6 : 0.08);
+      if (j < it.ny - 2) addC(at(i, j), at(i, j + 2), it.sy * 2, GARMENTS[it.type].stiff ? 0.6 : 0.08);
+    }
+    it.start = k; it.placed = true; k += it.count;
+  });
+  // constraints start at their current (crumpled) length and relax to rest length
+  for (const c of cons) { const a = c[0] * 3, b = c[1] * 3; const cur = Math.hypot(pos[a] - pos[b], pos[a + 1] - pos[b + 1], pos[a + 2] - pos[b + 2]); c[2] = Math.min(c[4], Math.max(cur, c[4] * 0.2)); }
+  Object.assign(cloth, { n, pos, prev, rad, gid, gix, giy, cons, contact: new Uint8Array(n) });
+}
+
+// spatial hash for particle–particle contacts
+const HASH_SIZE = 8192, CELL = 0.05;
+const hashHead = new Int32Array(HASH_SIZE), hashNext = new Int32Array(4096);
+const hcell = (x, y, z) => ((Math.floor(x / CELL) * 73856093) ^ (Math.floor(y / CELL) * 19349663) ^ (Math.floor(z / CELL) * 83492791)) & (HASH_SIZE - 1);
+
+const drumState = { phi: 0, omegaVis: 0 };
+const clothOut = { J: 0, tau: 0, Ux: 0, Uy: 0, splash: [], torqueHist: [] };
+const _gD = { x: 0, y: 0, z: 0 };
+function clothStep(dtFrame) {
+  const n = cloth.n; if (!n) { clothOut.J = 0; clothOut.tau = 0; clothOut.Ux = clothOut.Uy = 0; return; }
+  const w = plant.omega, alpha = clamp(plant.alpha, -40, 40);
+  const subs = 5, dt = Math.min(dtFrame, 1 / 30) / subs;
+  const { pos, prev, rad, gid, gix, giy, cons, contact } = cloth;
+  const R = DR.R, zF = DR.front - 0.006, zB = DRUM_BACK + 0.004;
+  const items = laundry.items;
+  const ys = plant.level;                     // water surface (level frame)
+  // relax crumpled constraints toward rest length
+  for (const c of cons) if (c[2] < c[4]) c[2] = Math.min(c[4], c[2] + c[4] * 0.6 * dtFrame);
+  // centrifugal acceleration is clamped: above ~4 g everything is pinned anyway
+  const wEff = Math.sign(w) * Math.min(Math.abs(w), Math.sqrt(40 / R));
+  for (let s = 0; s < subs; s++) {
+    const phi = drumState.phi + drumState.omegaVis * dt * s;
+    // gravity in drum frame
+    const gTy = -9.81 * CT, gTz = -9.81 * ST;
+    const cphi = Math.cos(phi), sphi = Math.sin(phi);
+    _gD.x = sphi * gTy; _gD.y = cphi * gTy; _gD.z = gTz;
+    const dt2 = dt * dt;
+    for (let i = 0; i < n; i++) {
+      const o = i * 3, x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      let vx = (x - prev[o]) / dt, vy = (y - prev[o + 1]) / dt, vz = (z - prev[o + 2]) / dt;
+      // is the particle under water? (level frame y)
+      const yT = x * sphi + y * cphi; // rotate drum→tub (only y needed)
+      const yL = CT * yT + ST * z;
+      const under = yL < ys;
+      let ax = _gD.x, ay = _gD.y, az = _gD.z;
+      if (under) { ax *= 0.22; ay *= 0.22; az *= 0.22; }
+      ax += wEff * wEff * x + 2 * wEff * vy + alpha * y;
+      ay += wEff * wEff * y - 2 * wEff * vx - alpha * x;
+      // drag toward water (stationary in the tub frame = counter-rotating in drum frame)
+      const kd = under ? 9 : 0.4;
+      vx += ((wEff * y) - vx) * Math.min(1, kd * dt); vy += ((-wEff * x) - vy) * Math.min(1, kd * dt); vz *= 1 - Math.min(1, kd * dt);
+      prev[o] = x; prev[o + 1] = y; prev[o + 2] = z;
+      pos[o] = x + vx * dt + ax * dt2; pos[o + 1] = y + vy * dt + ay * dt2; pos[o + 2] = z + vz * dt + az * dt2;
+    }
+    // constraints (2 iterations)
+    for (let it = 0; it < 2; it++) {
+      for (let c = 0; c < cons.length; c++) {
+        const C = cons[c], a = C[0] * 3, b = C[1] * 3;
+        const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+        let diff = (d - C[2]) / d * 0.5 * C[3];
+        if (C[3] < 0.2 && d < C[2]) diff *= 0.2; // bending resists compression weakly
+        pos[a] += dx * diff; pos[a + 1] += dy * diff; pos[a + 2] += dz * diff;
+        pos[b] -= dx * diff; pos[b + 1] -= dy * diff; pos[b + 2] -= dz * diff;
+      }
+    }
+    // particle-particle contacts
+    if (n <= hashNext.length) {
+      hashHead.fill(-1);
+      for (let i = 0; i < n; i++) { const o = i * 3, h = hcell(pos[o], pos[o + 1], pos[o + 2]); hashNext[i] = hashHead[h]; hashHead[h] = i; }
+      for (let i = 0; i < n; i++) {
+        const o = i * 3, x = pos[o], y = pos[o + 1], z = pos[o + 2];
+        const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL), cz = Math.floor(z / CELL);
+        for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) for (let oz = -1; oz <= 1; oz++) {
+          let j = hashHead[(((cx + ox) * 73856093) ^ ((cy + oy) * 19349663) ^ ((cz + oz) * 83492791)) & (HASH_SIZE - 1)];
+          while (j !== -1) {
+            if (j > i && !(gid[i] === gid[j] && Math.abs(gix[i] - gix[j]) <= 2 && Math.abs(giy[i] - giy[j]) <= 2)) {
+              const p2 = j * 3, dx = pos[p2] - x, dy = pos[p2 + 1] - y, dz = pos[p2 + 2] - z;
+              const md = (rad[i] + rad[j]) * 0.9, d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < md * md && d2 > 1e-10) {
+                const d = Math.sqrt(d2), corr = (md - d) / d * 0.5;
+                pos[o] -= dx * corr; pos[o + 1] -= dy * corr; pos[o + 2] -= dz * corr;
+                pos[p2] += dx * corr; pos[p2 + 1] += dy * corr; pos[p2 + 2] += dz * corr;
+              }
+            }
+            j = hashNext[j];
+          }
+        }
+      }
+    }
+    // drum walls, lifters, friction
+    for (let i = 0; i < n; i++) {
+      const o = i * 3; let x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      const pr = rad[i]; let hit = 0;
+      const r = Math.hypot(x, y), rmax = R - pr;
+      if (r > rmax) { const k = rmax / r; x *= k; y *= k; hit = 1; }
+      // lifters
+      const th = Math.atan2(y, x), rr = Math.hypot(x, y);
+      if (rr > R - DR.lifterH - pr) {
+        for (const L of LIFTERS) {
+          let d = th - L; d -= Math.round(d / (Math.PI * 2)) * Math.PI * 2;
+          const tt = clamp((R - rr) / DR.lifterH, 0, 1);
+          const half = lerp(LIFTER_HALF_BASE, LIFTER_HALF_TOP, tt) / Math.max(0.05, rr) + pr / Math.max(0.05, rr);
+          if (Math.abs(d) < half && rr > R - DR.lifterH - pr) {
+            const penR = rr - (R - DR.lifterH - pr), penA = (half - Math.abs(d)) * rr;
+            if (penR < penA) { const k = (R - DR.lifterH - pr) / rr; x *= k; y *= k; }
+            else { const na = L + Math.sign(d || 1) * half; x = rr * Math.cos(na); y = rr * Math.sin(na); }
+            hit = 2; break;
+          }
+        }
+      }
+      if (z < zB + pr) { z = zB + pr; hit = hit || 3; } else if (z > zF - pr) { z = zF - pr; hit = hit || 3; }
+      if (hit) {
+        // Coulomb-ish friction: the wall is at rest in this frame
+        const mu = hit === 2 ? 0.75 : 0.55;
+        prev[o] = lerp(prev[o], x, mu); prev[o + 1] = lerp(prev[o + 1], y, mu); prev[o + 2] = lerp(prev[o + 2], z, mu * 0.5);
+      }
+      pos[o] = x; pos[o + 1] = y; pos[o + 2] = z; contact[i] = hit ? 1 : 0;
+    }
+  }
+  // ---- outputs: inertia, gravity torque, imbalance, submersion, splashes ----
+  let J = 0, tau = 0, Ux = 0, Uy = 0;
+  const phi = drumState.phi, cphi = Math.cos(phi), sphi = Math.sin(phi);
+  const gx = sphi * -9.81 * CT, gy = cphi * -9.81 * CT;
+  const sub = new Float32Array(items.length);
+  const plastered = w * w * R > 9.81 * 1.05;
+  for (let i = 0; i < n; i++) {
+    const it = items[gid[i]], m = (it.dry + it.water) / it.count;
+    const o = i * 3, x = pos[o], y = pos[o + 1], z = pos[o + 2];
+    const r2 = x * x + y * y;
+    // plastered (>1 g at the wall): every layer co-rotates with the drum
+    if (contact[i] || plastered) { J += m * r2; tau += m * (x * gy - y * gx); } else J += m * r2 * 0.15;
+    Ux += m * x; Uy += m * y;
+    const yL = CT * (x * sphi + y * cphi) + ST * z;
+    if (yL < ys) sub[gid[i]]++;
+    // splash detection: fast particle crossing the surface downward
+    const vyL = (CT * ((x - cloth.prev[o]) * sphi + (y - cloth.prev[o + 1]) * cphi)) / dt;
+    if (yL < ys && yL > ys - 0.03 && vyL < -0.9 && clothOut.splash.length < 40) {
+      const xT = x * cphi - y * sphi;
+      clothOut.splash.push([xT, -ST * (x * sphi + y * cphi) + CT * z, Math.min(1, -vyL / 3)]);
+    }
+  }
+  items.forEach((it, gi) => it.submerged = sub[gi] / it.count);
+  clothOut.J = J; clothOut.tau = tau; clothOut.Ux = Ux; clothOut.Uy = Uy;
+}
+const _cr = (p0, p1, p2, p3, t) => { const t2 = t * t, t3 = t2 * t; return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3); };
+function updateGarmentMeshes() {
+  const { pos } = cloth;
+  for (const it of laundry.items) {
+    const attr = it.mesh.geometry.attributes.position, nx = it.nx, ny = it.ny, UP = it.up, base = it.start;
+    const P = (i, j, k) => pos[(base + clamp(j, 0, ny - 1) * nx + clamp(i, 0, nx - 1)) * 3 + k];
+    // PlaneGeometry vertices run row-major from the top row
+    for (let fj = 0; fj < it.fy; fj++) {
+      const gj = fj / UP, j1 = Math.min(ny - 2, Math.floor(gj)), tj = gj - j1;
+      for (let fi = 0; fi < it.fx; fi++) {
+        const gi = fi / UP, i1 = Math.min(nx - 2, Math.floor(gi)), ti = gi - i1;
+        const out = [0, 0, 0];
+        for (let k = 0; k < 3; k++) {
+          if (nx < 3 || ny < 3) { out[k] = lerp(lerp(P(i1, j1, k), P(i1 + 1, j1, k), ti), lerp(P(i1, j1 + 1, k), P(i1 + 1, j1 + 1, k), ti), tj); continue; }
+          const r = [];
+          for (let dj = -1; dj <= 2; dj++) r.push(_cr(P(i1 - 1, j1 + dj, k), P(i1, j1 + dj, k), P(i1 + 1, j1 + dj, k), P(i1 + 2, j1 + dj, k), ti));
+          out[k] = _cr(r[0], r[1], r[2], r[3], tj);
+        }
+        attr.setXYZ((it.fy - 1 - fj) * it.fx + fi, out[0], out[1], out[2]);
+      }
+    }
+    attr.needsUpdate = true; it.mesh.geometry.computeVertexNormals(); it.mesh.geometry.computeBoundingSphere();
+    const wet = clamp(it.water / (it.dry * it.absorb), 0, 1), dirt = it.soil;
+    const v = 1 - 0.38 * wet;
+    it.mat.color.setRGB(v * (1 - 0.25 * dirt), v * (1 - 0.32 * dirt), v * (1 - 0.42 * dirt));
+    it.mat.roughness = 0.92 - 0.35 * wet;
+  }
+}
+// ============================================================================
+// WATER VISUALS — level-frame heightfield + droplet particles
+// ============================================================================
+const POOL = { NU: 48, NA: 26, H: null, Hv: null, slope: 0, slopeV: 0, energy: 0 };
+POOL.H = new Float32Array(POOL.NU * POOL.NA); POOL.Hv = new Float32Array(POOL.NU * POOL.NA);
+const poolGeo = new THREE.PlaneGeometry(1, 1, POOL.NU - 1, POOL.NA - 1);
+const poolMat = new THREE.MeshPhysicalMaterial({ color: 0x9fc6d4, roughness: 0.05, metalness: 0.0, transparent: true, opacity: 0.62, envMapIntensity: 1.3, side: THREE.DoubleSide, clearcoat: 1, clearcoatRoughness: 0.03, depthWrite: false });
+const poolMesh = new THREE.Mesh(poolGeo, poolMat); poolMesh.frustumCulled = false; poolMesh.renderOrder = 2; waterFrame.add(poolMesh);
+const foamTex = canvasTex(512, 512, (c) => {
+  c.clearRect(0, 0, 512, 512);
+  for (let i = 0; i < 2600; i++) { const x = rand(0, 512), y = rand(0, 512), r = rand(2, 11); const gr = c.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(255,255,255,0.95)'); gr.addColorStop(0.8, 'rgba(250,252,255,0.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = gr; c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); }
+}, { repeat: [3, 2] });
+const foamMat = new THREE.MeshStandardMaterial({ map: foamTex, transparent: true, opacity: 0, roughness: 0.6, depthWrite: false, side: THREE.DoubleSide });
+const foamMesh = new THREE.Mesh(poolGeo, foamMat); foamMesh.frustumCulled = false; foamMesh.renderOrder = 3; foamMesh.position.y = 0.003; waterFrame.add(foamMesh);
+const _murky = new THREE.Color(0x8b7f66), _clear = new THREE.Color(0xa7cfdc), _soft = new THREE.Color(0xc7b3d6);
+
+function poolImpulse(xL, zL, amt) {
+  const a = -zL / CT, u = xL / SPEC.tub.R;
+  const iu = Math.round((u + 1) / 2 * (POOL.NU - 1)), ia = Math.round((a - TUB_FRONT) / (TUB_BACK - TUB_FRONT) * (POOL.NA - 1));
+  if (iu < 1 || iu > POOL.NU - 2 || ia < 1 || ia > POOL.NA - 2) return;
+  for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) POOL.Hv[(ia + dj) * POOL.NU + iu + di] -= amt * (di || dj ? 0.5 : 1);
+}
+function updatePool(dt) {
+  const { NU, NA, H, Hv } = POOL, ys = plant.level, R = SPEC.tub.R;
+  const visible = plant.V > 0.15 && ys > Y_LOW + 0.003;
+  poolMesh.visible = foamMesh.visible = visible;
+  // drag slosh: the rotating drum drags water up one side
+  const w = plant.omega;
+  const target = Math.abs(w) < 9 ? clamp(w * 0.045, -0.35, 0.35) : 0;
+  POOL.slopeV += ((target - POOL.slope) * 26 - POOL.slopeV * 3.2) * dt; POOL.slope += POOL.slopeV * dt;
+  // lifters ploughing through the surface
+  if (visible && Math.abs(w) > 0.3 && Math.abs(w) < 9) {
+    for (const L of LIFTERS) {
+      const a = drumState.phi + L, ca = Math.cos(a), sa = Math.sin(a);
+      for (const r of [DR.R - DR.lifterH, DR.R - 0.02]) {
+        const yy = r * sa * CT; // approx level-frame height at front
+        if (yy < ys + 0.01 && yy > ys - 0.08) { for (let k = 0; k < 6; k++) poolImpulse(r * ca, -(TUB_FRONT + 0.06 + k * 0.07) * CT, Math.abs(w) * 0.0009); }
+      }
+    }
+  }
+  // wave equation (2 substeps)
+  const du = 2 * R / (NU - 1), da = (TUB_BACK - TUB_FRONT) / (NA - 1), c2 = 0.45 * 0.45, h = dt / 2;
+  for (let s = 0; s < 2; s++) {
+    for (let j = 1; j < NA - 1; j++) for (let i = 1; i < NU - 1; i++) {
+      const k = j * NU + i;
+      const lap = (H[k - 1] + H[k + 1] - 2 * H[k]) / (du * du) + (H[k - NU] + H[k + NU] - 2 * H[k]) / (da * da);
+      Hv[k] += c2 * lap * h; Hv[k] *= 0.992;
+    }
+    let e = 0;
+    for (let k = 0; k < H.length; k++) { H[k] += Hv[k] * h; H[k] = clamp(H[k], -0.04, 0.04); e += Math.abs(Hv[k]); }
+    POOL.energy = e / H.length;
+  }
+  if (!visible) return;
+  const attr = poolGeo.attributes.position;
+  for (let j = 0; j < NA; j++) {
+    const a = TUB_FRONT + j * da, yc = -a * ST, zc = -a * CT;
+    const dy = ys - yc; let half;
+    if (dy <= -R) half = 0; else if (dy >= R) half = R; else half = Math.sqrt(R * R - dy * dy) * 0.985;
+    for (let i = 0; i < NU; i++) {
+      const u = i / (NU - 1) * 2 - 1, x = u * half;
+      const edge = 1 - u * u;
+      let y = (half > 0 ? ys : yc - R) + H[j * NU + i] * edge + POOL.slope * x * (half > 0 ? 1 : 0);
+      if (half > 0) y = Math.max(y, yc - R + 0.002);
+      attr.setXYZ((NA - 1 - j) * NU + i, x, y, zc);
+    }
+  }
+  attr.needsUpdate = true; poolGeo.computeVertexNormals();
+  const soilC = plant.soil / Math.max(1, plant.V + heldWater());
+  poolMat.color.copy(_clear).lerp(_murky, clamp(soilC / 3, 0, 0.85)).lerp(_soft, clamp(plant.soft / Math.max(1, plant.V) * 0.3, 0, 0.4));
+  poolMat.opacity = 0.5 + clamp(soilC / 4, 0, 0.35);
+  foamMat.opacity = clamp(plant.suds * 0.38, 0, 0.95);
+  foamTex.offset.x += plant.omega * dt * 0.02;
+}
+
+// ---- droplets ----
+const MAXD = 2200;
+const drops = { n: 0, p: new Float32Array(MAXD * 3), v: new Float32Array(MAXD * 3), life: new Float32Array(MAXD), size: new Float32Array(MAXD), outside: new Uint8Array(MAXD) };
+const dropMat = new THREE.MeshStandardMaterial({ color: 0xcfe6ef, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.75, envMapIntensity: 1.6 });
+const dropMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), dropMat, MAXD);
+dropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); dropMesh.frustumCulled = false; dropMesh.count = 0; waterFrame.add(dropMesh);
+const glassState = { wet: 0, fog: 0 };
+function spawnDrop(x, y, z, vx, vy, vz, size = 0.004, outside = 0) {
+  if (drops.n >= MAXD) return;
+  const i = drops.n++, o = i * 3;
+  drops.p[o] = x; drops.p[o + 1] = y; drops.p[o + 2] = z; drops.v[o] = vx; drops.v[o + 1] = vy; drops.v[o + 2] = vz;
+  drops.life[i] = 3; drops.size[i] = size; drops.outside[i] = outside;
+}
+const toLevel = (xT, yT, zT, out) => { out[0] = xT; out[1] = CT * yT + ST * zT; out[2] = -ST * yT + CT * zT; return out; };
+const _lv = [0, 0, 0], _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v3 = new THREE.Vector3(), _s3 = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+const emit = { inlet: 0, jets: 0, drip: 0, spray: 0 };
+function updateDrops(dt) {
+  const ys = plant.level, w = plant.omega, aw = Math.abs(w);
+  // sources --------------------------------------------------------
+  emit.inlet += plant.inflow * 45 * dt;
+  while (emit.inlet >= 1) {
+    emit.inlet--;
+    toLevel(rand(-0.03, 0.03), 0.185 + rand(-0.005, 0.005), -0.02, _lv);
+    spawnDrop(_lv[0], _lv[1], _lv[2], rand(-0.15, 0.15), rand(-0.6, -0.2), rand(-1.4, -1.0), rand(0.003, 0.006));
+    if (Math.random() < 0.15) glassState.wet = Math.min(1, glassState.wet + 0.002);
+  }
+  if (plant.circOn && plant.V > 2.5) {
+    emit.jets += 4 * 110 * dt;
+    while (emit.jets >= 1) {
+      emit.jets--;
+      const a = JET_ANGLES[Math.floor(Math.random() * 4)], r0 = 0.205;
+      const sx = Math.cos(a) * r0, sy = Math.sin(a) * r0, sp = rand(2.2, 3.2);
+      const tx = rand(-0.05, 0.05), ty = rand(-0.08, 0.04), tz = -0.30;
+      const dl = Math.hypot(tx - sx, ty - sy, tz + 0.03);
+      toLevel(sx, sy, -0.03, _lv); const p0 = [..._lv];
+      toLevel((tx - sx) / dl * sp, (ty - sy) / dl * sp, (tz + 0.03) / dl * sp, _lv);
+      spawnDrop(p0[0], p0[1], p0[2], _lv[0], _lv[1], _lv[2], rand(0.0025, 0.0045));
+    }
+    glassState.wet = Math.min(1, glassState.wet + 0.08 * dt);
+  }
+  // lifters shedding water through their perforations while turning
+  if (plant.V > 1.0 && aw > 1 && aw < 7) {
+    emit.drip += aw * 22 * dt;
+    while (emit.drip >= 1) {
+      emit.drip--;
+      const L = LIFTERS[Math.floor(Math.random() * 3)], a = drumState.phi + L;
+      if (Math.sin(a) < -0.2) continue;
+      const r = rand(DR.R - DR.lifterH, DR.R - 0.01), z = -rand(0.06, 0.48);
+      const vt = w * r;
+      toLevel(r * Math.cos(a), r * Math.sin(a), z, _lv);
+      spawnDrop(_lv[0], _lv[1], _lv[2], -Math.sin(a) * vt * 0.6, Math.cos(a) * vt * 0.6, 0, rand(0.003, 0.0055));
+    }
+  }
+  // garments dripping
+  if (laundry.items.length && aw < 7 && Math.random() < 0.9) {
+    for (let k = 0; k < 4; k++) {
+      const i = Math.floor(Math.random() * cloth.n), it = laundry.items[cloth.gid[i]];
+      if (!it || it.water < it.dry * 0.8) continue;
+      const o = i * 3, ph = drumState.phi, x = cloth.pos[o], y = cloth.pos[o + 1], z = cloth.pos[o + 2];
+      const xT = x * Math.cos(ph) - y * Math.sin(ph), yT = x * Math.sin(ph) + y * Math.cos(ph);
+      toLevel(xT, yT, z, _lv); if (_lv[1] > ys + 0.03) spawnDrop(_lv[0], _lv[1], _lv[2], 0, -0.1, 0, rand(0.0025, 0.004));
+    }
+  }
+  // spin extraction spray leaving through the perforations (visible in x-ray)
+  const g = w * w * DR.R / 9.81;
+  if (g > 3 && plant.V >= 0) {
+    let extract = 0; for (const it of laundry.items) { const eq = it.dry * Math.min(it.absorb, 0.30 + 5.0 / Math.sqrt(g)); if (it.water > eq) extract += it.water - eq; }
+    emit.spray += Math.min(500, extract * 300) * dt;
+    while (emit.spray >= 1) {
+      emit.spray--;
+      const a = Math.random() * Math.PI * 2, z = -rand(0.05, 0.48), vt = w * DR.R * 0.5;
+      toLevel(Math.cos(a) * (DR.R + 0.004), Math.sin(a) * (DR.R + 0.004), z, _lv); const p0 = [..._lv];
+      toLevel(-Math.sin(a) * vt + Math.cos(a) * 2, Math.cos(a) * vt + Math.sin(a) * 2, 0, _lv);
+      spawnDrop(p0[0], p0[1], p0[2], _lv[0], _lv[1], _lv[2], rand(0.002, 0.004), 1);
+    }
+  }
+  // splashes from cloth hitting the bath
+  for (const [x, z, s] of clothOut.splash) {
+    poolImpulse(x, z, 0.02 * s);
+    for (let k = 0; k < 3 + s * 6; k++) spawnDrop(x + rand(-0.02, 0.02), ys + 0.005, z + rand(-0.02, 0.02), rand(-0.5, 0.5), rand(0.4, 1.4) * s, rand(-0.3, 0.3), rand(0.003, 0.006));
+    if (s > 0.5 && Math.random() < 0.15) audio.thump(s);
+  }
+  clothOut.splash.length = 0;
+  // integrate -------------------------------------------------------
+  let k = 0;
+  for (let i = 0; i < drops.n; i++) {
+    const o = i * 3;
+    let x = drops.p[o], y = drops.p[o + 1], z = drops.p[o + 2], vx = drops.v[o], vy = drops.v[o + 1] - 9.81 * dt, vz = drops.v[o + 2];
+    x += vx * dt; y += vy * dt; z += vz * dt;
+    let life = drops.life[i] - dt;
+    // tub-frame coordinates for wall tests
+    const yT = CT * y - ST * z, zT = ST * y + CT * z, r = Math.hypot(x, yT);
+    if (drops.outside[i]) { if (r > SPEC.tub.R - 0.004) life = 0; }
+    else {
+      if (r > DR.R - 0.004 && Math.random() < 0.6) life = 0;                 // through the perforations
+      if (zT < DRUM_BACK + 0.003) { vz = Math.abs(vz) * 0.3; }
+      if (zT > -0.02 && vz > 0) { vz = -vz * 0.3; glassState.wet = Math.min(1, glassState.wet + 0.0015); }
+    }
+    if (plant.V > 0.15 && y < plant.level + POOL.slope * x) { if (!drops.outside[i]) poolImpulse(x, z, 0.002); life = 0; }
+    if (y < Y_SUMP) life = 0;
+    if (life > 0) {
+      const j = k * 3; drops.p[j] = x; drops.p[j + 1] = y; drops.p[j + 2] = z; drops.v[j] = vx; drops.v[j + 1] = vy; drops.v[j + 2] = vz;
+      drops.life[k] = life; drops.size[k] = drops.size[i]; drops.outside[k] = drops.outside[i];
+      const sp = Math.hypot(vx, vy, vz), s = drops.size[k];
+      _v3.set(x, y, z); if (sp > 0.01) _q.setFromUnitVectors(_up, _s3.set(vx / sp, vy / sp, vz / sp)); else _q.identity();
+      _s3.set(s, s * (1 + Math.min(4, sp * 0.9)), s);
+      _m4.compose(_v3, _q, _s3); dropMesh.setMatrixAt(k, _m4); k++;
+    }
+  }
+  drops.n = k; dropMesh.count = k; dropMesh.instanceMatrix.needsUpdate = true;
+  // glass film
+  glassState.wet = Math.max(0, glassState.wet - dt * 0.012 * (plant.omega > 30 ? 4 : 1));
+  const fogTarget = plant.V + heldWater() > 1 ? clamp((plant.T - 32) / 30, 0, 0.75) : 0;
+  glassState.fog = smooth(glassState.fog, fogTarget, 0.05, dt);
+  doorGlassWet.mat.opacity = clamp(glassState.wet, 0, 0.85);
+  doorGlassWet.fogMat.opacity = glassState.fog;
+}
+// ============================================================================
+// CONTROLLER (MICOM) — cycle data from the owner's manual, process list from
+// the service manual §5-4, error logic from §7-2.
+// ============================================================================
+const TEMPS = ['Extra Hot', 'Hot', 'Warm', 'Cold', 'Tap Cold'];
+const SPINS = ['Extra High', 'High', 'Medium', 'Low', 'No Spin'];
+const SOILS = ['Heavy', 'Medium Heavy', 'Normal', 'Medium Light', 'Light'];
+const TEMP_C = { 'Extra Hot': 63, 'Hot': 49, 'Warm': 32, 'Cold': 21, 'Tap Cold': null };
+const ALL_T = TEMPS, HWCT = ['Hot', 'Warm', 'Cold', 'Tap Cold'];
+const ALL_S = SPINS, ALL_SO = SOILS;
+const O = (steam, fresh, turbo, cold, pre) => ({ steam, fresh, turbo, cold, pre });
+// opts values: 0 = not allowed, 1 = allowed, 2 = automatically included (†)
+const CYCLES = {
+  'Normal':        { temp: 'Warm', temps: ALL_T, spin: 'High', spins: ALL_S, soil: 'Normal', soils: ALL_SO, opts: O(1, 1, 2, 1, 1), wash: 26, rinses: 2, level: 0, motions: 'aidd', aidd: true },
+  'Heavy Duty':    { temp: 'Warm', temps: ALL_T, spin: 'Extra High', spins: ALL_S, soil: 'Heavy', soils: ALL_SO, opts: O(1, 1, 2, 1, 1), wash: 38, rinses: 2, level: 1, motions: 'heavy', soak: true },
+  'Bedding':       { temp: 'Warm', temps: HWCT, spin: 'Medium', spins: ['Medium', 'Low', 'No Spin'], soil: 'Normal', soils: ALL_SO, opts: O(1, 1, 1, 1, 1), wash: 30, rinses: 2, level: 3, motions: 'bedding' },
+  'Sanitary':      { temp: 'Extra Hot', temps: ['Extra Hot'], spin: 'High', spins: ALL_S, soil: 'Normal', soils: ALL_SO, opts: O(1, 1, 1, 0, 1), wash: 40, rinses: 3, level: 1, motions: 'heavy', tempC: 66 },
+  'Allergiene':    { temp: null, temps: [], spin: 'High', spins: ALL_S, soil: null, soils: [], opts: O(2, 1, 1, 0, 0), wash: 42, rinses: 3, level: 1, motions: 'heavy', tempC: 63 },
+  'Tub Clean':     { temp: null, temps: [], spin: null, spins: [], soil: null, soils: [], opts: O(0, 0, 0, 0, 0), wash: 30, rinses: 2, level: 6, motions: 'tubclean', tempC: 70, tubClean: true },
+  'Bright Whites': { temp: 'Hot', temps: HWCT, spin: 'High', spins: ALL_S, soil: 'Normal', soils: ALL_SO, opts: O(1, 1, 1, 0, 1), wash: 32, rinses: 2, level: 1, motions: 'aidd', aidd: true },
+  'Delicates':     { temp: 'Cold', temps: ['Warm', 'Cold', 'Tap Cold'], spin: 'Medium', spins: ['Medium', 'Low', 'No Spin'], soil: 'Normal', soils: ALL_SO, opts: O(0, 1, 0, 1, 1), wash: 14, rinses: 2, level: 3, motions: 'delicate' },
+  'Perm. Press':   { temp: 'Warm', temps: HWCT, spin: 'Medium', spins: ['High', 'Medium', 'Low', 'No Spin'], soil: 'Normal', soils: ALL_SO, opts: O(0, 1, 1, 1, 1), wash: 18, rinses: 2, level: 2, motions: 'gentle', cooldown: true },
+  'Towels':        { temp: 'Warm', temps: HWCT, spin: 'Extra High', spins: ALL_S, soil: 'Normal', soils: ALL_SO, opts: O(0, 1, 1, 1, 1), wash: 28, rinses: 2, level: 2, motions: 'heavy' },
+  'Speed Wash':    { temp: 'Hot', temps: HWCT, spin: 'Extra High', spins: ALL_S, soil: 'Light', soils: ALL_SO, opts: O(0, 1, 1, 1, 0), wash: 5, rinses: 1, level: -1, motions: 'speed', speed: true },
+  'Downloaded':    { temp: 'Warm', temps: HWCT, spin: 'High', spins: ALL_S, soil: 'Normal', soils: ALL_SO, opts: O(0, 1, 0, 1, 1), wash: 16, rinses: 2, level: 0, motions: 'aidd' },
+};
+const CYCLE_ORDER = [...CYCLES_LEFT.slice(0, 1), ...CYCLES_RIGHT, ...CYCLES_LEFT.slice(1).reverse()]; // knob order clockwise from Normal
+const SOIL_ADJ = { 'Heavy': 12, 'Medium Heavy': 6, 'Normal': 0, 'Medium Light': -4, 'Light': -8 };
+const U_LIMIT = (rpm) => rpm >= 1250 ? 0.13 : rpm >= 950 ? 0.17 : rpm >= 750 ? 0.21 : rpm >= 350 ? 0.32 : 0.6; // kg·m allowed at each spin speed
+const rpmToW = (r) => r * Math.PI / 30, wToRpm = (w) => w * 30 / Math.PI;
+
+// --- drum motions ("6 Motion") ---
+const MOTIONS = {
+  tumbling:   { label: 'Tumbling',   agit: 1.0, seq: [[46, 11, 3], ['brake', 2.5], [-46, 11, 3], ['brake', 2.5]] },
+  rolling:    { label: 'Rolling',    agit: 0.65, seq: [[28, 9, 2], ['brake', 1.5], [-28, 9, 2], ['brake', 1.5]] },
+  stepping:   { label: 'Stepping',   agit: 1.25, seq: [[64, 3.5, 6], ['hardbrake', 1.2], ['coast', 0.8], [-64, 3.5, 6], ['hardbrake', 1.2], ['coast', 0.8]] },
+  swing:      { label: 'Swing',      agit: 0.45, seq: [[32, 1.3, 4], ['brake', 0.7], [-32, 1.3, 4], ['brake', 0.7]] },
+  scrubbing:  { label: 'Scrubbing',  agit: 1.35, seq: [[56, 2.2, 7], ['hardbrake', 0.5], [-56, 2.2, 7], ['hardbrake', 0.5]] },
+  filtration: { label: 'Filtration', agit: 0.9, seq: [[96, 9, 3, 'circ'], ['brake', 2.5], [46, 5, 3]] },
+  soak:       { label: 'Soak',       agit: 0.05, seq: [['coast', 120]] },
+};
+const MOTION_PLANS = {
+  thick: ['tumbling', 'stepping', 'scrubbing', 'tumbling', 'filtration'],
+  mixed: ['tumbling', 'rolling', 'stepping', 'tumbling', 'filtration'],
+  soft:  ['rolling', 'swing', 'rolling', 'filtration'],
+  heavy: ['tumbling', 'scrubbing', 'stepping', 'soak', 'tumbling', 'scrubbing'],
+  bedding: ['rolling', 'filtration', 'tumbling', 'rolling'],
+  delicate: ['swing', 'rolling', 'swing'],
+  gentle: ['rolling', 'tumbling', 'swing'],
+  speed: ['tumbling', 'filtration'],
+  tubclean: ['tumbling', 'filtration'],
+  rinse: ['tumbling', 'rolling'],
+};
+class MotionPlayer {
+  constructor() { this.plan = ['tumbling']; this.pi = 0; this.si = 0; this.t = 0; this.blockT = 0; this.name = '—'; this.useCirc = false; }
+  setPlan(plan, blockSec = 70) { this.plan = plan; this.pi = 0; this.si = 0; this.t = 0; this.blockT = 0; this.block = blockSec; }
+  update(dt, allowCirc) {
+    const m = MOTIONS[this.plan[this.pi % this.plan.length]];
+    this.name = m.label;
+    const seg = m.seq[this.si % m.seq.length];
+    this.t += dt; this.blockT += dt;
+    const p = plant;
+    let circ = false;
+    if (typeof seg[0] === 'number') { p.mode = 'speed'; p.target = rpmToW(seg[0]); p.accel = seg[2] || 3; circ = seg[3] === 'circ'; }
+    else if (seg[0] === 'brake') { p.mode = 'brake'; p.brakeT = 8; }
+    else if (seg[0] === 'hardbrake') { p.mode = 'brake'; p.brakeT = 30; }
+    else { p.mode = 'coast'; }
+    const dur = typeof seg[0] === 'number' ? seg[1] : seg[1];
+    if (Math.abs(p.omega) > 1) p.agitation = Math.max(p.agitation, m.agit);
+    p.circOn = allowCirc && p.V > 2.5 && (circ || (this.blockT % 40) < 14);
+    if (this.t >= dur) { this.t = 0; this.si++; if (this.si >= m.seq.length) { this.si = 0; if (this.blockT > (m === MOTIONS.soak ? 120 : this.block)) { this.blockT = 0; this.pi++; } } }
+  }
+}
+
+const ctrl = {
+  state: 'OFF',            // OFF | IDLE | DELAY | RUN | PAUSE | END | ERROR | TEST
+  cycle: 'Normal', temp: 'Warm', spin: 'High', soil: 'Normal',
+  opts: { steam: false, fresh: false, turbo: true, cold: false, pre: false, extraRinse: 0, signal: true, wifi: false, remote: false, ctrlLock: false },
+  delayH: 0, delayLeft: 0, idleT: 0, endT: 0, error: null, errorT: 0, pausedFrom: null,
+  program: [], step: null, stepIdx: 0, remainMin: 0, stage: null, stagesPlanned: new Set(),
+  sensed: { mass: null, J: null, fabric: null, wetMass: null, level: 5 },
+  spinLimitRpm: null, ueFlag: false, sudCount: 0, cyclesSinceTubClean: 27, showTcl: 0,
+  motion: new MotionPlayer(), testStep: -1, freqCheck: false, msg: null, msgT: 0, pfFlag: false, lastU: null,
+  lockedBlink: 0, dispAlt: 0, slowSensing: false,
+};
+
+// ---------- step factories ----------
+function mkStep(o) { return Object.assign({ t: 0, done: false, stage: 'wash', name: 'step', est: 1, remaining() { return Math.max(0, this.est - this.t / 60); }, start() {}, update() { return true; }, end() {} }, o); }
+function allOff() { const v = plant.valves; v.pre = v.main = v.hot = v.bleach = false; plant.heaterCmd = false; plant.circOn = false; plant.pumpOn = false; plant.softPath = false; }
+function fillTargetFreq(extra = 0) { const L = clamp(ctrl.sensed.level + extra, 1, 10); return 24.30 - 0.11 * (L - 1); }
+function mixValves(t, targetC, via) {
+  // temperature mixing by duty-cycling hot and cold valves through the selected compartment
+  const v = plant.valves; v.pre = v.main = v.hot = v.bleach = false;
+  if (via === 'bleach') { v.bleach = true; return; }
+  const coldValve = via === 'pre' ? 'pre' : 'main';
+  if (targetC == null) { v[coldValve] = true; return; }
+  const r = clamp((targetC - plant.supply.coldT) / Math.max(1, plant.supply.hotT - plant.supply.coldT), 0, 1);
+  const ph = (t % 10) / 10;
+  if (r >= 0.98) v.hot = true; else if (r <= 0.02) v[coldValve] = true; else { if (ph < r) v.hot = true; else v[coldValve] = true; }
+  if (!plant.supply.hot && v.hot) { v.hot = false; v[coldValve] = true; }  // no hot supply: fall back to cold
+}
+function lockStep() {
+  return mkStep({ name: 'Door lock', stage: null, est: 0.05,
+    start() { plant.lockCmd = true; },
+    update(dt) { if (!plant.doorClosed) { raiseError('dE'); return false; } return plant.doorLocked; } });
+}
+function senseStep(wet = false) {
+  // AI DD: plaster the load at 60 rpm, then accelerate at a fixed rate and integrate motor torque.
+  // J = (mean motor torque − modelled friction) / measured angular acceleration; repeated CW and CCW.
+  return mkStep({ name: wet ? 'AI DD fabric sensing' : 'Load sensing (AI DD)', stage: 'sense', est: wet ? 0.7 : 0.9, ph: 0, dir: 1, samples: [], slow: true,
+    update(dt) {
+      const p = plant, d = this.dir;
+      if (this.ph === 0) { p.mode = 'speed'; p.target = d * rpmToW(60); p.accel = 3; if (Math.abs(p.omega) > rpmToW(58)) { this.hold = (this.hold || 0) + dt; if (this.hold > 4) { this.ph = 1; this.acc = { tq: 0, tf: 0, n: 0, w0: null, t0: 0 }; } } }
+      else if (this.ph === 1) {
+        p.mode = 'speed'; p.target = d * rpmToW(100); p.accel = 2.0;
+        const aw = Math.abs(p.omega);
+        if (aw > rpmToW(65) && aw < rpmToW(92)) {
+          const a = this.acc; if (a.w0 == null) { a.w0 = aw; a.t0 = this.t; }
+          const Vest = Math.max(0, volumeAtFreq(p.freq) - 1.2);
+          a.tq += d * p.torque * dt; a.tf += (0.55 + 0.006 * aw + 3e-5 * aw * aw + 0.0035 * Vest * aw) * dt; a.n += dt; a.w1 = aw; a.t1 = this.t;
+        } else if (aw >= rpmToW(92)) {
+          const a = this.acc, alpha = (a.w1 - a.w0) / Math.max(0.05, a.t1 - a.t0);
+          this.samples.push(((a.tq - a.tf) / Math.max(0.05, a.n)) / Math.max(0.2, alpha));
+          this.ph = 2;
+        }
+      } else if (this.ph === 2) {
+        p.mode = 'brake'; p.brakeT = 12;
+        if (Math.abs(p.omega) < 0.2) { if (this.samples.length < 2) { this.dir = -this.dir; this.ph = 0; this.hold = 0; } else this.ph = 3; }
+      } else {
+        const J = this.samples.reduce((a, b) => a + b, 0) / this.samples.length;
+        const Jl = Math.max(0, J - plant.J0), mass = Jl / (0.25 * 0.25);
+        if (!wet) {
+          ctrl.sensed.J = Jl; ctrl.sensed.mass = mass;
+          const cyc = CYCLES[ctrl.cycle];
+          ctrl.sensed.level = clamp(Math.round(1 + mass * 1.15) + (cyc.level || 0), 1, 10);
+        } else {
+          ctrl.sensed.wetMass = mass;
+          const ratio = (mass - ctrl.sensed.mass) / Math.max(0.3, ctrl.sensed.mass);
+          ctrl.sensed.fabric = ratio > 1.15 ? 'thick' : ratio > 0.6 ? 'mixed' : 'soft';
+          ctrl.sensed.ratio = ratio;
+          if (CYCLES[ctrl.cycle].aidd && ctrl.soil !== 'Heavy') ctrl.motion.setPlan(MOTION_PLANS[ctrl.sensed.fabric]);
+        }
+        return true;
+      }
+      return false;
+    } });
+}
+function fillStep(kind) {
+  // kind: 'pre' | 'main' | 'rinse' | 'final' | 'suds'
+  return mkStep({ name: kind === 'pre' ? 'Pre-wash water supply' : kind === 'main' ? 'Water supply' : kind === 'suds' ? 'Suds removal fill' : 'Rinse water supply', stage: kind === 'pre' || kind === 'main' ? 'wash' : 'rinse', est: 2.5,
+    start() { this.tf = fillTargetFreq(kind === 'rinse' || kind === 'final' ? 1 : 0); if (ctrl.opts.turbo && (kind === 'rinse' || kind === 'final')) this.tf += 0.25; },
+    remaining() { const need = Math.max(0, volumeAtFreq(this.tf || 24) - plant.V); return need / Math.max(4, valveFlowLpm(true) * 1.5) + 0.3; },
+    update(dt) {
+      const p = plant, cyc = CYCLES[ctrl.cycle];
+      p.softPath = kind === 'final';
+      const tC = kind === 'pre' || kind === 'main' ? (ctrl.opts.cold ? Math.min(TEMP_C[ctrl.temp] ?? 99, 24) : (cyc.tempC ? Math.min(cyc.tempC, 49) : TEMP_C[ctrl.temp])) : null;
+      mixValves(this.t, tC == null ? null : Math.min(tC, 49), kind === 'pre' ? 'pre' : 'main');
+      ctrl.motion.update(dt, false); if (p.mode === 'speed') p.target = Math.sign(p.target) * Math.min(Math.abs(p.target), rpmToW(30));
+      if (p.freq <= this.tf) { allOff(); return true; }
+      if (this.t > SPEC.ieMinFillMin * 60 && p.freq > SPEC.freqMinFill) { allOff(); raiseError('IE'); return false; }
+      if (this.t > SPEC.ieFullMin * 60) { allOff(); raiseError('IE'); return false; }
+      return false;
+    }, end() { allOff(); } });
+}
+function heatStep(targetC, steam) {
+  return mkStep({ name: steam ? 'Steam heating' : 'Heating and washing', stage: 'wash', est: 8,
+    remaining() { const C = 4186 * (plant.V + heldWater()) + 9000; return Math.max(0, (targetC - plant.thermistor)) * C / SPEC.heaterW / 60 + 0.2; },
+    update(dt) {
+      const p = plant;
+      if (p.thermistor < -30 || p.thermistor > 100) { raiseError('tE'); return false; }
+      p.heaterCmd = true;
+      ctrl.motion.update(dt, ctrl.opts.turbo);
+      if (p.freq > fillTargetFreq() + 0.18) mixValves(this.t, null, 'main'); else { p.valves.main = false; p.valves.hot = false; }
+      if (p.thermistor >= targetC || this.t > 60 * 75) { p.heaterCmd = false; return true; }
+      return false;
+    }, end() { plant.heaterCmd = false; allOff(); } });
+}
+function washStep(minutes, kind) {
+  return mkStep({ name: kind === 'pre' ? 'Pre-wash' : kind === 'rinse' ? 'Rinse' : 'Washing', stage: kind === 'rinse' ? 'rinse' : 'wash', est: minutes, bleachDone: false, heatTarget: null,
+    start() { if (kind === 'rinse') ctrl.motion.setPlan(MOTION_PLANS.rinse, 50); },
+    update(dt) {
+      const p = plant;
+      ctrl.motion.update(dt, ctrl.opts.turbo || kind === 'main');
+      // keep level: absorbing fabric lowers the bath → top up (service manual §5-4 step 3)
+      if (p.freq > fillTargetFreq(kind === 'rinse' ? 1 : 0) + 0.15 && !this.refill) this.refill = true;
+      if (this.refill) { mixValves(this.t, null, 'main'); if (p.freq <= fillTargetFreq(kind === 'rinse' ? 1 : 0)) { this.refill = false; p.valves.main = p.valves.hot = false; } }
+      if (kind === 'main' && !this.bleachDone && this.t > 300 && p.dispenser.bleach > 1) { p.valves.bleach = true; if (this.t > 330) { p.valves.bleach = false; this.bleachDone = true; } }
+      // hold wash temperature if a heated cycle
+      if (this.heatTarget) p.heaterCmd = p.thermistor < this.heatTarget - 1.5;
+      if (this.t >= minutes * 60) { allOff(); return true; }
+      return false;
+    }, end() { allOff(); } });
+}
+function drainStep(name = 'Drainage') {
+  return mkStep({ name, stage: null, est: 1.3,
+    remaining() { return Math.max(0.2, plant.V / Math.max(3, pumpFlowLpm()) + 0.25); },
+    update(dt) {
+      const p = plant; p.pumpOn = true;
+      p.mode = 'speed'; p.target = rpmToW(this.t % 20 < 10 ? 30 : -30); p.accel = 2;
+      if (this.t > SPEC.oeMin * 60) { raiseError('OE'); return false; }
+      if (p.freq >= SPEC.freqEmpty - 0.25) { this.after = (this.after || 0) + dt; if (this.after > 12) return true; }
+      return false;
+    }, end() { plant.pumpOn = false; } });
+}
+function coolStep() {
+  return mkStep({ name: 'Cooling', stage: 'wash', est: 2,
+    update(dt) {
+      const p = plant; if (p.T < 45 || this.t > 240) { allOff(); return true; }
+      mixValves(this.t, null, 'main'); p.pumpOn = p.freq < fillTargetFreq() + 0.05;
+      ctrl.motion.update(dt, false); return false;
+    }, end() { allOff(); } });
+}
+function untangleStep(targetRpmFn, label = 'Untangling (sensing eccentricity)') {
+  return mkStep({ name: label, stage: 'spin', est: 1.2, ph: 0, tries: 0, tmax: -1e9, tmin: 1e9, slow: true,
+    start() { ctrl.spinLimitRpm = null; this.final = label.startsWith('Untangling (sensing'); },
+    update(dt) {
+      const p = plant; p.pumpOn = true;
+      const target = targetRpmFn();
+      if (target <= 0) return true;
+      if (this.ph === 0) { // disentangle tumble
+        p.mode = 'speed'; p.target = rpmToW(this.tries % 2 ? -46 : 46); p.accel = 3; p.agitation = Math.max(p.agitation, 0.3);
+        if (this.t > 12 + this.tries * 2) { this.ph = 1; this.t = 0; }
+      } else if (this.ph === 1) { // slow ramp to distribution speed
+        p.mode = 'speed'; p.target = rpmToW(93); p.accel = 0.55;
+        if (Math.abs(p.omega) > rpmToW(91)) { this.ph = 2; this.t = 0; this.tmax = -1e9; this.tmin = 1e9; }
+      } else if (this.ph === 2) { // measure torque ripple over ~3 revolutions
+        p.mode = 'speed'; p.target = rpmToW(93);
+        if (this.t > 0.6) { this.tmax = Math.max(this.tmax, clothOut.tau); this.tmin = Math.min(this.tmin, clothOut.tau); }
+        if (this.t > 4.5) {
+          const U = (this.tmax - this.tmin) / 2 / (9.81 * CT);
+          ctrl.lastU = U;
+          const lim = U_LIMIT(target);
+          if (U <= lim) return true;
+          this.tries++;
+          if (this.tries >= 12) {
+            let allowed = 0; for (const r of [1300, 1000, 800, 400]) if (r <= target && U <= U_LIMIT(r)) { allowed = r; break; }
+            ctrl.spinLimitRpm = allowed;
+            if (this.final) ctrl.ueFlag = true;
+            if (allowed === 0) { ctrl.msg = 'UE'; ctrl.msgT = 6; audio.errorAlarm(); }
+            return true;
+          }
+          this.ph = 3; this.t = 0;
+        }
+      } else { p.mode = 'brake'; p.brakeT = 10; if (Math.abs(p.omega) < 0.3) { this.ph = 0; this.t = 0; } }
+      return false;
+    } });
+}
+function spinStep(targetRpmFn, holdMin, name = 'Main spin', intermittent = false) {
+  return mkStep({ name, stage: 'spin', est: holdMin + 1.5, ph: 0,
+    remaining() { const r = targetRpmFn(); return r <= 0 ? 0 : Math.max(0, (this.ph < 2 ? holdMin + (r - wToRpm(Math.abs(plant.omega))) / 900 : holdMin - this.hold / 60)); },
+    hold: 0,
+    update(dt) {
+      const p = plant, target = targetRpmFn();
+      p.pumpOn = true;
+      if (target <= 0) return true;
+      if (ctrl.opts && plant.faults.vib) { raiseError('uS'); return false; }
+      // suds check (§5-4 step 10): water-level frequency below 23.0 kHz while spinning
+      if (Math.abs(p.omega) > rpmToW(150) && p.freq < SPEC.freqSuds) { ctrl.sudsDetected = true; return true; }
+      // vibration watchdog (3-axis sensor on the tub)
+      if (plant.tub.amp > 0.018 && Math.abs(p.omega) > rpmToW(200)) { ctrl.vibAbort = true; return true; }
+      const dir = Math.sign(p.omega) || 1;
+      const stages = intermittent ? [300, target] : [400, 800, target];
+      const stageRpm = stages[Math.min(this.ph, stages.length - 1)];
+      p.mode = 'speed'; p.target = dir * rpmToW(Math.min(stageRpm, target)); p.accel = 1.6;
+      if (Math.abs(p.omega) >= rpmToW(Math.min(stageRpm, target)) * 0.98) {
+        this.stageHold = (this.stageHold || 0) + dt;
+        if (this.ph < stages.length - 1 && this.stageHold > (intermittent ? 15 : 25)) { this.ph++; this.stageHold = 0; }
+        if (this.ph >= stages.length - 1 || stageRpm >= target) { this.hold += dt; if (this.hold >= holdMin * 60) return true; }
+      }
+      return false;
+    } });
+}
+function coastStep(name = 'Remaining spin') {
+  return mkStep({ name, stage: 'spin', est: 0.8,
+    update(dt) { const p = plant; p.pumpOn = Math.abs(p.omega) > 5; p.mode = 'brake'; p.brakeT = 2.2; return Math.abs(p.omega) < 0.15; },
+    end() { plant.pumpOn = false; } });
+}
+function tumbleStep(sec, name = 'Disentangling') {
+  return mkStep({ name, stage: 'spin', est: sec / 60,
+    update(dt) { const p = plant; p.mode = 'speed'; p.target = rpmToW(this.t % 12 < 6 ? 40 : -40); p.accel = 3; if (this.t > sec) { p.mode = 'brake'; p.brakeT = 10; return Math.abs(p.omega) < 0.2; } return false; } });
+}
+function sudsRoutine() {
+  // service manual error 11: detect suds → add suds-reducing process (drains + rinses)
+  const steps = [];
+  for (let i = 0; i < 2; i++) { steps.push(coastStep('Suds removal – stop')); steps.push(drainStep('Suds removal – drain')); steps.push(fillStep('suds')); steps.push(washStep(3, 'rinse')); }
+  steps.push(drainStep('Suds removal – drain'));
+  steps.forEach(s => s.sud = true);
+  return steps;
+}
+
+function finalSpinRpm() {
+  let r = SPEC.spinRpm[ctrl.spin] ?? 0;
+  if (ctrl.spinLimitRpm != null) r = Math.min(r, ctrl.spinLimitRpm);
+  if (ctrl.vibLimit != null) r = Math.min(r, ctrl.vibLimit);
+  return r;
+}
+const midSpinRpm = () => { const r = finalSpinRpm(); return r === 0 ? 0 : Math.min(800, Math.max(400, r)); };
+function buildProgram(kind = 'cycle') {
+  const cyc = CYCLES[ctrl.cycle] || CYCLES['Normal'];
+  const P = [];
+  P.push(lockStep());
+  if (kind === 'spinOnly') {
+    P.push(drainStep()); P.push(untangleStep(finalSpinRpm)); P.push(spinStep(finalSpinRpm, spinHoldMin()));
+    P.push(coastStep()); P.push(tumbleStep(15)); return P;
+  }
+  if (kind === 'rinseSpin') {
+    ctrl.sensed.level = 4;
+    P.push(senseStep()); P.push(fillStep('final')); P.push(washStep(5, 'rinse')); P.push(drainStep());
+    P.push(untangleStep(finalSpinRpm)); P.push(spinStep(finalSpinRpm, spinHoldMin())); P.push(coastStep()); P.push(tumbleStep(15)); return P;
+  }
+  if (!cyc.tubClean && !cyc.speed) P.push(senseStep());
+  if (ctrl.opts.pre && cyc.opts.pre) { P.push(fillStep('pre')); P.push(washStep(13, 'pre')); P.push(drainStep()); P.push(untangleStep(() => 400, 'Pre-wash spin')); P.push(spinStep(() => 400, 0.5, 'Pre-wash spin', true)); P.push(coastStep()); }
+  P.push(fillStep('main'));
+  if (!cyc.tubClean && !cyc.speed && cyc.aidd) { const soak = washStep(3, 'main'); soak.name = 'Soaking and washing'; P.push(soak); P.push(senseStep(true)); }
+  const target = ctrl.opts.cold ? null : (cyc.tempC || (ctrl.temp === 'Extra Hot' ? TEMP_C['Extra Hot'] : null));
+  const steam = ctrl.opts.steam || cyc.opts.steam === 2;
+  if (target || steam) P.push(heatStep(target || 55, steam));
+  let wash = cyc.wash + (ctrl.soil ? SOIL_ADJ[ctrl.soil] : 0);
+  if (ctrl.opts.turbo && cyc.opts.turbo) wash -= cyc.opts.turbo === 2 ? 4 : 6;
+  if (ctrl.opts.cold) wash += 8;
+  if (ctrl.sensed.mass != null) wash += clamp((ctrl.sensed.mass - 3.5) * 1.5, -4, 6);
+  if (!cyc.tubClean && !cyc.speed && cyc.aidd) wash -= 3;
+  wash = Math.max(cyc.speed ? 4 : 8, wash);
+  if (cyc.soak) wash += 2;
+  const ws = washStep(wash, 'main'); if (target) ws.heatTarget = target; P.push(ws);
+  if (target && target > 45 || cyc.cooldown) P.push(coolStep());
+  P.push(drainStep());
+  P.push(untangleStep(midSpinRpm, 'Untangling')); P.push(spinStep(midSpinRpm, 1.0, 'Intermittent / rinse spin', true)); P.push(coastStep());
+  const rinses = cyc.rinses + ctrl.opts.extraRinse;
+  for (let i = 0; i < rinses; i++) {
+    const last = i === rinses - 1;
+    P.push(fillStep(last ? 'final' : 'rinse')); P.push(washStep(ctrl.opts.turbo ? 3 : 4, 'rinse')); P.push(drainStep('Last drainage'));
+    if (!last) { P.push(untangleStep(midSpinRpm, 'Disentangling')); P.push(spinStep(midSpinRpm, 1.0, 'Rinse spin', true)); P.push(coastStep()); }
+  }
+  P.push(untangleStep(finalSpinRpm)); P.push(spinStep(finalSpinRpm, spinHoldMin(), 'Main spin'));
+  P.push(coastStep()); P.push(tumbleStep(20));
+  return P;
+}
+function spinHoldMin() { const r = finalSpinRpm(); return r >= 1250 ? 6 : r >= 950 ? 5 : r >= 750 ? 4 : r > 0 ? 3 : 0; }
+function planTimes() {
+  if (ctrl.state !== 'RUN' && ctrl.state !== 'PAUSE' && ctrl.state !== 'DELAY') { ctrl.program = buildProgram(ctrl.mode || 'cycle'); }
+  ctrl.stagesPlanned = new Set(ctrl.program.map(s => s.stage).filter(Boolean));
+}
+function estimateRemaining() {
+  let m = 0;
+  const P = ctrl.program;
+  for (let i = ctrl.state === 'RUN' || ctrl.state === 'PAUSE' ? ctrl.stepIdx : 0; i < P.length; i++) {
+    const s = P[i];
+    if ((ctrl.state === 'RUN' || ctrl.state === 'PAUSE') && i === ctrl.stepIdx) m += s.remaining(); else m += s.est;
+  }
+  return m;
+}
+
+// ---------- errors ----------
+const ERR_TEXT = { IE: 'Water inlet error', UE: 'Unbalance error', OE: 'Drain error', FE: 'Overflow error', PE: 'Pressure sensor error', dE: 'Door open error', dE1: 'Door open error', tE: 'Heating / thermistor error', LE: 'Locked motor error', PF: 'Power failure', Sud: 'Suds error', uS: 'Vibration sensor error' };
+function raiseError(code) {
+  if (ctrl.state === 'ERROR' && ctrl.error === code) return;
+  ctrl.pausedFrom = ctrl.state === 'ERROR' ? ctrl.pausedFrom : ctrl.state;
+  ctrl.state = 'ERROR'; ctrl.error = code; ctrl.errorT = 0;
+  allOff(); plant.mode = 'brake'; plant.brakeT = 10;
+  if (code === 'FE') plant.pumpOn = true;
+  audio.errorAlarm(); toast(`${code} — ${ERR_TEXT[code] || 'error'}`);
+}
+function clearErrorToPause() {
+  if (ctrl.error === 'PE') { audio.deny(); return; }
+  if (ctrl.step && ['IE', 'OE', 'LE', 'dE', 'dE1', 'uS'].includes(ctrl.error)) { ctrl.step.t = 0; if (ctrl.error === 'uS') ctrl.vibLimit = 400; }
+  if (ctrl.error === 'uS') plant.faults.vib = false;
+  ctrl.error = null; ctrl.state = ctrl.program.length ? 'PAUSE' : 'IDLE'; plant.pumpOn = false;
+}
+
+// ---------- user actions ----------
+function powerPress() {
+  if (ctrl.state === 'OFF') {
+    if (!plant.powered) return;
+    ctrl.state = 'IDLE'; ctrl.idleT = 0; selectCycle('Normal', true); audio.powerOn();
+    if (ctrl.cyclesSinceTubClean >= 30) ctrl.showTcl = 4;
+    return;
+  }
+  if (ctrl.state === 'TEST') { exitTest(); return; }
+  // power off: cancels the cycle; water left in the drum drains after a delay
+  audio.powerOff();
+  const hadWater = plant.V > 1;
+  ctrl.state = 'OFF'; ctrl.program = []; ctrl.step = null; ctrl.error = null; allOff(); plant.mode = 'brake'; plant.brakeT = 10; ctrl.opts.ctrlLock = ctrl.opts.ctrlLock; plant.lockCmd = false;
+  if (hadWater) { ctrl.postOffDrain = 25; }
+}
+function startPress() {
+  const s = ctrl.state;
+  if (s === 'OFF') return;
+  if (s === 'TEST') { testAdvance(); return; }
+  if (s === 'ERROR') { clearErrorToPause(); return; }
+  if (s === 'IDLE' || s === 'END') {
+    if (s === 'END') { ctrl.state = 'IDLE'; selectCycle(ctrl.cycle, true); }
+    if (!plant.doorClosed) { ctrl.msg = 'dE'; ctrl.msgT = 3; audio.deny(); return; }
+    ctrl.mode = ctrl.mode || 'cycle';
+    ctrl.program = buildProgram(ctrl.mode); ctrl.stepIdx = 0; ctrl.step = null; ctrl.spinLimitRpm = null; ctrl.ueFlag = false; ctrl.sudCount = 0; ctrl.vibRetries = 0; ctrl.vibLimit = null; ctrl.lastU = null; ctrl.offError = null;
+    ctrl.sensed = { mass: null, J: null, fabric: null, wetMass: null, level: CYCLES[ctrl.cycle].tubClean ? 7 : 5 };
+    plant.waterUsed = 0; plant.energyWh = 0; plant.soil = 0;
+    for (const it of laundry.items) it.soilStart = it.soil;
+    const cyc = CYCLES[ctrl.cycle];
+    ctrl.motion.setPlan(MOTION_PLANS[cyc.motions === 'aidd' ? (ctrl.soil === 'Heavy' ? 'heavy' : 'mixed') : cyc.motions]);
+    if (ctrl.delayH > 0) { ctrl.state = 'DELAY'; ctrl.delayLeft = ctrl.delayH * 3600; audio.beep(); return; }
+    ctrl.state = 'RUN'; audio.beep(); planTimes(); return;
+  }
+  if (s === 'DELAY') { ctrl.state = 'IDLE'; ctrl.delayH = 0; audio.beep(); return; }
+  if (s === 'RUN') { pauseCycle(); return; }
+  if (s === 'PAUSE') {
+    if (!plant.doorClosed) { ctrl.msg = 'dE'; ctrl.msgT = 3; audio.deny(); return; }
+    ctrl.state = 'RUN'; plant.lockCmd = true; audio.beep(); return;
+  }
+}
+function pauseCycle() {
+  ctrl.state = 'PAUSE'; allOff(); plant.mode = 'brake'; plant.brakeT = 12; audio.beep();
+}
+function doorSafeToUnlock() { return plant.freq > 24.2 && plant.T < SPEC.doorUnlockTempC && Math.abs(plant.omega) < 0.3; }
+function selectCycle(name, silent) {
+  const cyc = CYCLES[name]; if (!cyc) return;
+  ctrl.cycle = name; ctrl.temp = cyc.temp; ctrl.spin = cyc.spin; ctrl.soil = cyc.soil;
+  ctrl.opts.steam = cyc.opts.steam === 2; ctrl.opts.turbo = cyc.opts.turbo === 2; ctrl.opts.cold = false; ctrl.opts.pre = false; ctrl.opts.extraRinse = 0; ctrl.opts.fresh = false;
+  ctrl.mode = 'cycle'; ctrl.delayH = 0;
+  planTimes(); if (!silent) audio.beep();
+}
+function canChange() {
+  if (ctrl.opts.ctrlLock) { ctrl.msg = 'CL'; ctrl.msgT = 2; audio.deny(); return false; }
+  if (ctrl.state !== 'IDLE' && ctrl.state !== 'END' && ctrl.state !== 'PAUSE') { audio.deny(); return false; }
+  if (ctrl.state === 'END') { ctrl.state = 'IDLE'; }
+  ctrl.idleT = 0; return true;
+}
+function cycleModifier(kind) {
+  if (!canChange()) return;
+  const cyc = CYCLES[ctrl.cycle];
+  const list = kind === 'temp' ? cyc.temps : kind === 'spin' ? cyc.spins : cyc.soils;
+  if (!list.length) { audio.deny(); return; }
+  let cur = ctrl[kind], idx = list.indexOf(cur);
+  let next = list[(idx + 1) % list.length];
+  if (kind === 'spin' && ctrl.opts.turbo && next === 'No Spin') next = list[(list.indexOf(next) + 1) % list.length];
+  ctrl[kind] = next; audio.beep(); planTimes();
+}
+function toggleOption(opt) {
+  if (!canChange()) return;
+  const cyc = CYCLES[ctrl.cycle], allowed = cyc.opts[opt];
+  if (!allowed || allowed === 2) { audio.deny(); return; }
+  if (opt === 'steam' && ctrl.opts.cold && !ctrl.opts.steam) { audio.deny(); return; }
+  if (opt === 'cold' && ctrl.opts.steam && !ctrl.opts.cold) { audio.deny(); return; }
+  ctrl.opts[opt] = !ctrl.opts[opt];
+  if (opt === 'turbo' && ctrl.opts.turbo && ctrl.spin === 'No Spin') ctrl.spin = cyc.spin;
+  audio.beep(); planTimes();
+}
+function handleButton(id, long) {
+  if (ctrl.state === 'OFF') { return; }
+  if (ctrl.state === 'TEST') { audio.beep(); return; }
+  if (long) {
+    if (id === 'rinsespin') { ctrl.opts.ctrlLock = !ctrl.opts.ctrlLock; audio.beep(); toast(ctrl.opts.ctrlLock ? 'Control Lock ON' : 'Control Lock OFF'); return; }
+    if (ctrl.opts.ctrlLock) { ctrl.msg = 'CL'; ctrl.msgT = 2; audio.deny(); return; }
+    if (id === 'steam') { const c = CYCLES[ctrl.cycle]; if (!c.opts.fresh) { audio.deny(); return; } ctrl.opts.fresh = !ctrl.opts.fresh; audio.beep(); return; }
+    if (id === 'prewash') { if (!ctrl.opts.wifi) { audio.deny(); toast('Remote Start needs Wi-Fi (hold Delay Wash 3 s)'); return; } ctrl.opts.remote = !ctrl.opts.remote; audio.beep(); return; }
+    if (id === 'delay') { ctrl.opts.wifi = !ctrl.opts.wifi; audio.beep(); toast(ctrl.opts.wifi ? 'Wi-Fi on (simulated)' : 'Wi-Fi off'); return; }
+    if (id === 'spin') { if (ctrl.state !== 'IDLE') { audio.deny(); return; } ctrl.mode = 'spinOnly'; ctrl.cycle = ctrl.cycle; ctrl.spin = 'Extra High'; audio.beep(); planTimes(); toast('Spin Only'); return; }
+  }
+  if (ctrl.opts.ctrlLock) { ctrl.msg = 'CL'; ctrl.msgT = 2; audio.deny(); return; }
+  switch (id) {
+    case 'temp': return cycleModifier('temp');
+    case 'spin': return cycleModifier('spin');
+    case 'soil': return cycleModifier('soil');
+    case 'steam': return toggleOption('steam');
+    case 'prewash': return toggleOption('pre');
+    case 'turbo': return toggleOption('turbo');
+    case 'cold': return toggleOption('cold');
+    case 'signal': ctrl.opts.signal = !ctrl.opts.signal; audio.beep(); return;
+    case 'extrarinse': if (!canChange()) return; ctrl.opts.extraRinse = (ctrl.opts.extraRinse + 1) % 3; audio.beep(); planTimes(); return;
+    case 'rinsespin': if (ctrl.state !== 'IDLE') { audio.deny(); return; } ctrl.mode = ctrl.mode === 'rinseSpin' ? 'cycle' : 'rinseSpin'; audio.beep(); planTimes(); return;
+    case 'delay': if (ctrl.state !== 'IDLE') { audio.deny(); return; } ctrl.delayH = ctrl.delayH >= SPEC.delayMaxH ? 0 : ctrl.delayH + 1; audio.beep(); return;
+    case 'additem': {
+      if (ctrl.state !== 'RUN' && ctrl.state !== 'PAUSE') { audio.deny(); return; }
+      if (CYCLES[ctrl.cycle].tubClean) { audio.deny(); return; }
+      if (plant.T > SPEC.doorUnlockTempC) { audio.deny(); toast('Add Item refused: drum above 45 °C'); return; }
+      if (ctrl.state === 'RUN') pauseCycle();
+      ctrl.addItemPending = true; return;
+    }
+  }
+}
+function knobTurn(dir) {
+  if (ctrl.state === 'OFF') return;
+  if (ctrl.opts.ctrlLock) { ctrl.msg = 'CL'; ctrl.msgT = 2; audio.deny(); return; }
+  if (ctrl.state !== 'IDLE' && ctrl.state !== 'END') { audio.deny(); return; }
+  ctrl.state = 'IDLE'; ctrl.idleT = 0;
+  const i = CYCLE_ORDER.indexOf(ctrl.cycle);
+  selectCycle(CYCLE_ORDER[(i + dir + CYCLE_ORDER.length) % CYCLE_ORDER.length]);
+}
+
+// ---------- load test mode (service manual §6-2) ----------
+const TEST_STEPS = ['Lamps + door lock', 'Tumble clockwise', 'Low speed spin', 'High speed spin', 'Pre-wash valve', 'Main-wash valve', 'Hot valve', 'Bleach valve', 'Tumble counter-clockwise', 'Heater 3 s', 'Circulation pump', 'Drain pump', 'Modem check'];
+function enterTest() {
+  if (ctrl.state !== 'OFF') { toast('Load test mode starts from power-off'); return; }
+  if (laundry.items.length) { toast('Washer must be empty for load test mode'); return; }
+  ctrl.state = 'TEST'; ctrl.testStep = 0; plant.lockCmd = true; audio.beep(); setTimeout(() => audio.beep(), 200);
+}
+function exitTest() { ctrl.state = 'OFF'; ctrl.testStep = -1; allOff(); plant.mode = 'brake'; plant.lockCmd = false; audio.powerOff(); }
+function testAdvance() { ctrl.testStep = Math.min(TEST_STEPS.length - 1, ctrl.testStep + 1); ctrl.testT = 0; audio.beep(); }
+function testUpdate(dt) {
+  const p = plant, s = ctrl.testStep; allOff(); ctrl.testT = (ctrl.testT || 0) + dt;
+  p.mode = 'brake'; p.brakeT = 10;
+  if (s === 1) { p.mode = 'speed'; p.target = rpmToW(46); p.accel = 3; }
+  if (s === 2) { p.mode = 'speed'; p.target = rpmToW(600); p.accel = 2; p.pumpOn = true; }
+  if (s === 3) { p.mode = 'speed'; p.target = rpmToW(1100); p.accel = 2; p.pumpOn = true; }
+  if (s === 4) p.valves.pre = p.freq > 23.9;
+  if (s === 5) p.valves.main = p.freq > 23.9;
+  if (s === 6) p.valves.hot = p.freq > 23.9;
+  if (s === 7) p.valves.bleach = p.freq > 23.9;
+  if (s === 8) { p.mode = 'speed'; p.target = rpmToW(-46); p.accel = 3; }
+  if (s === 9) p.heaterCmd = ctrl.testT < 3;
+  if (s === 10) p.circOn = p.V > 2;
+  if (s === 11) p.pumpOn = true;
+}
+
+// ---------- main controller tick ----------
+function ctrlUpdate(dt) {
+  const p = plant;
+  if (ctrl.msgT > 0) { ctrl.msgT -= dt; if (ctrl.msgT <= 0) ctrl.msg = null; }
+  if (ctrl.showTcl > 0) ctrl.showTcl -= dt;
+  // water left after power-off drains after a delay
+  if (ctrl.state === 'OFF') {
+    if (ctrl.postOffDrain > 0) { ctrl.postOffDrain -= dt; if (ctrl.postOffDrain <= 0) ctrl.postOffDraining = true; }
+    if (ctrl.postOffDraining) { p.pumpOn = p.V > 0.05; if (!p.pumpOn) ctrl.postOffDraining = false; }
+    if (Math.abs(p.omega) < 0.3 && p.freq > 24.2) p.lockCmd = false;
+    p.mode = 'brake'; p.brakeT = 6;
+    return;
+  }
+  if (!p.powered) return;
+  // overflow protection is always armed
+  if (p.freq < SPEC.freqOverflow && !p.faults.press && ctrl.error !== 'FE') raiseError('FE');
+  if (p.faults.press && ctrl.state !== 'IDLE') { ctrl.pe = (ctrl.pe || 0) + dt; if (ctrl.pe > 3 && ctrl.error !== 'PE') raiseError('PE'); } else ctrl.pe = 0;
+  switch (ctrl.state) {
+    case 'IDLE': {
+      ctrl.idleT += dt; p.lockCmd = false; p.mode = 'brake'; p.brakeT = 6;
+      if (ctrl.idleT > 240) { ctrl.state = 'OFF'; audio.powerOff(); }
+      break;
+    }
+    case 'DELAY': {
+      ctrl.delayLeft -= dt; p.lockCmd = true;
+      if (ctrl.delayLeft <= 0) { ctrl.delayH = 0; ctrl.state = 'RUN'; }
+      break;
+    }
+    case 'TEST': testUpdate(dt); break;
+    case 'PAUSE': {
+      allOff(); p.mode = 'brake'; p.brakeT = 12;
+      if (doorSafeToUnlock()) p.lockCmd = false;
+      else if (ctrl.addItemPending && p.freq <= 24.2) { ctrl.addItemPending = false; audio.deny(); toast('Water level too high – door stays locked'); }
+      if (!p.doorLocked) ctrl.addItemPending = false;
+      ctrl.idleT += dt;
+      break;
+    }
+    case 'ERROR': {
+      ctrl.errorT += dt; allOff(); p.mode = 'brake'; p.brakeT = 10;
+      if (ctrl.error === 'FE') p.pumpOn = true;
+      const lim = ['PE', 'tE', 'dE', 'dE1', 'dE2'].includes(ctrl.error) ? 20 : 240;
+      if (ctrl.error !== 'FE' && ctrl.errorT > lim) { ctrl.state = 'OFF'; ctrl.offError = ctrl.error; allOff(); ctrl.postOffDrain = p.V > 1 ? 25 : 0; }
+      if (doorSafeToUnlock() && ctrl.error !== 'dE') p.lockCmd = false;
+      break;
+    }
+    case 'END': {
+      ctrl.endT += dt; p.lockCmd = !doorSafeToUnlock();
+      if (ctrl.opts.fresh && laundry.items.length && ctrl.endT < SPEC.freshCareH * 3600 && p.doorClosed) {
+        // Fresh Care: periodic tumbling to prevent wrinkles
+        const ph = ctrl.endT % 600; if (ph < 25) { p.lockCmd = true; p.mode = 'speed'; p.target = rpmToW(ph % 10 < 5 ? 40 : -40); p.accel = 3; } else { p.mode = 'brake'; }
+      } else if (ctrl.endT > 8 && !ctrl.opts.fresh) { ctrl.state = 'OFF'; p.lockCmd = false; }
+      break;
+    }
+    case 'RUN': {
+      p.lockCmd = true;
+      // door switch says open while running → dE
+      if (!p.doorClosed || p.faults.doorsw) { raiseError(p.faults.doorsw ? 'dE1' : 'dE'); break; }
+      // locked motor detection
+      if (p.mode === 'speed' && Math.abs(p.target) > 2 && Math.abs(p.omega) < 0.3) { ctrl.leT = (ctrl.leT || 0) + dt; if (ctrl.leT > 5) { raiseError('LE'); ctrl.leT = 0; break; } } else ctrl.leT = 0;
+      if (p.faults.therm && (CYCLES[ctrl.cycle].tempC || ctrl.temp === 'Extra Hot' || ctrl.opts.steam)) { raiseError('tE'); break; }
+      if (!ctrl.step) {
+        if (ctrl.stepIdx >= ctrl.program.length) { finishCycle(); break; }
+        ctrl.step = ctrl.program[ctrl.stepIdx]; ctrl.step.t = 0; ctrl.step.start();
+      }
+      const st = ctrl.step;
+      if (!p.doorLocked && st.name !== 'Door lock') { p.mode = 'coast'; break; }
+      st.t += dt;
+      const done = st.update(dt);
+      if (ctrl.state !== 'RUN') break;
+      ctrl.stage = st.stage || ctrl.stage;
+      if (done) {
+        st.end();
+        // flow control hooks
+        if (ctrl.sudsDetected) {
+          ctrl.sudsDetected = false; ctrl.sudCount++;
+          ctrl.msg = 'Sud'; ctrl.msgT = 8;
+          { const fn = st.name.includes('Main') ? finalSpinRpm : midSpinRpm; ctrl.program.splice(ctrl.stepIdx + 1, 0, ...sudsRoutine(), untangleStep(fn, st.name.includes('Main') ? 'Untangling (sensing eccentricity)' : 'Disentangling'), spinStep(fn, st.name.includes('Main') ? spinHoldMin() : 1.0, st.name, !st.name.includes('Main'))); }
+          if (ctrl.sudCount > 3) { ctrl.vibLimit = 400; }
+        }
+        if (ctrl.vibAbort) {
+          ctrl.vibAbort = false; ctrl.vibRetries = (ctrl.vibRetries || 0) + 1;
+          if (ctrl.vibRetries > 4) ctrl.vibLimit = ctrl.vibRetries > 6 ? 400 : 800;
+          { const fn = st.name === 'Main spin' ? finalSpinRpm : midSpinRpm; ctrl.program.splice(ctrl.stepIdx + 1, 0, coastStep('Vibration – stop'), untangleStep(fn, st.name === 'Main spin' ? 'Untangling (sensing eccentricity)' : 'Disentangling'), spinStep(fn, st.name === 'Main spin' ? spinHoldMin() : 1.0, st.name, st.name !== 'Main spin')); }
+        }
+        ctrl.stepIdx++; ctrl.step = null;
+      }
+      break;
+    }
+  }
+}
+function finishCycle() {
+  allOff(); plant.mode = 'brake'; plant.brakeT = 10;
+  ctrl.state = 'END'; ctrl.endT = 0; ctrl.step = null;
+  if (CYCLES[ctrl.cycle].tubClean) ctrl.cyclesSinceTubClean = 0; else ctrl.cyclesSinceTubClean++;
+  if (ctrl.ueFlag && ctrl.spinLimitRpm === 0) { ctrl.msg = 'UE'; ctrl.msgT = 12; }
+  if (ctrl.opts.signal) audio.endSong();
+  const cleaned = laundry.items.map(it => 1 - it.soil / Math.max(1e-3, it.soilStart ?? it.soil));
+  const avg = cleaned.length ? cleaned.reduce((a, b) => a + b, 0) / cleaned.length : 0;
+  toast(`Cycle complete · ${laundry.items.length ? `soil removed ${(avg * 100).toFixed(0)}% · ` : ''}water ${plant.waterUsed.toFixed(0)} L · energy ${plant.energyWh.toFixed(0)} Wh`);
+}
+function powerCut() {
+  if (!plant.powered) return;
+  const wasRunning = ctrl.state === 'RUN' || ctrl.state === 'PAUSE';
+  plant.powered = false; const saved = ctrl.state; ctrl.state = 'OFF'; allOff();
+  toast('Power outage…');
+  setTimeout(() => {
+    plant.powered = true;
+    if (wasRunning) { ctrl.state = 'ERROR'; ctrl.error = 'PF'; ctrl.errorT = 0; ctrl.pausedFrom = saved; audio.errorAlarm(); toast('Power restored — PF (press Start/Pause to resume)'); }
+  }, 5000);
+}
+// ============================================================================
+// DISPLAY (touch panel + 7-segment) — layout from owner's manual p.22-23
+// ============================================================================
+const DISP_BTNS = [
+  { id: 'steam', x0: 0.00, x1: 0.18, y0: 0.03, y1: 0.28, label: 'Steam', sub: '*Fresh Care', led: () => ctrl.opts.steam },
+  { id: 'prewash', x0: 0.00, x1: 0.18, y0: 0.29, y1: 0.53, label: 'Pre-wash', sub: '*Remote Start', led: () => ctrl.opts.pre },
+  { id: 'delay', x0: 0.00, x1: 0.18, y0: 0.54, y1: 0.78, label: 'Delay Wash', sub: '*Wi-Fi', led: () => ctrl.delayH > 0 || ctrl.state === 'DELAY' },
+  { id: 'turbo', x0: 0.82, x1: 1.00, y0: 0.03, y1: 0.28, label: 'TurboWash', sub: '', led: () => ctrl.opts.turbo },
+  { id: 'cold', x0: 0.82, x1: 1.00, y0: 0.29, y1: 0.53, label: 'Cold Wash', sub: '', led: () => ctrl.opts.cold },
+  { id: 'extrarinse', x0: 0.82, x1: 1.00, y0: 0.54, y1: 0.78, label: 'Extra Rinse', sub: '', led: () => ctrl.opts.extraRinse > 0 },
+  { id: 'additem', x0: 0.00, x1: 0.18, y0: 0.80, y1: 1.00, label: 'Add Item', sub: '' },
+  { id: 'temp', x0: 0.18, x1: 0.34, y0: 0.80, y1: 1.00, label: 'Temp.', sub: '' },
+  { id: 'spin', x0: 0.34, x1: 0.50, y0: 0.80, y1: 1.00, label: 'Spin', sub: '*Spin Only' },
+  { id: 'soil', x0: 0.50, x1: 0.65, y0: 0.80, y1: 1.00, label: 'Soil', sub: '' },
+  { id: 'signal', x0: 0.65, x1: 0.80, y0: 0.80, y1: 1.00, label: 'Signal', sub: '' },
+  { id: 'rinsespin', x0: 0.80, x1: 1.00, y0: 0.80, y1: 1.00, label: 'Rinse+Spin', sub: '*Control Lock', led: () => ctrl.mode === 'rinseSpin' },
+];
+const SEG = { '0': 'abcdef', '1': 'bc', '2': 'abged', '3': 'abgcd', '4': 'fgbc', '5': 'afgcd', '6': 'afgedc', '7': 'abc', '8': 'abcdefg', '9': 'abcdfg', '-': 'g', ' ': '',
+  E: 'adefg', r: 'eg', d: 'bcdeg', U: 'bcdef', u: 'cde', O: 'abcdef', o: 'cdeg', I: 'bc', F: 'aefg', P: 'abefg', t: 'defg', L: 'def', S: 'afgcd', C: 'adef', c: 'deg', n: 'ceg', l: 'ef', b: 'cdefg', H: 'bcefg', A: 'abcefg' };
+function draw7(c, ch, x, y, w, h, on, dim) {
+  const t = w * 0.17, segs = SEG[ch] ?? '';
+  const P = {
+    a: [[x + t, y], [x + w - t, y], [x + w - t * 1.5, y + t], [x + t * 1.5, y + t]],
+    b: [[x + w, y + t * 0.5], [x + w, y + h / 2 - t * 0.3], [x + w - t, y + h / 2 - t * 0.6], [x + w - t, y + t * 1.2]],
+    c: [[x + w, y + h / 2 + t * 0.3], [x + w, y + h - t * 0.5], [x + w - t, y + h - t * 1.2], [x + w - t, y + h / 2 + t * 0.6]],
+    d: [[x + t, y + h], [x + w - t, y + h], [x + w - t * 1.5, y + h - t], [x + t * 1.5, y + h - t]],
+    e: [[x, y + h / 2 + t * 0.3], [x, y + h - t * 0.5], [x + t, y + h - t * 1.2], [x + t, y + h / 2 + t * 0.6]],
+    f: [[x, y + t * 0.5], [x, y + h / 2 - t * 0.3], [x + t, y + h / 2 - t * 0.6], [x + t, y + t * 1.2]],
+    g: [[x + t * 0.6, y + h / 2], [x + t * 1.3, y + h / 2 - t / 2], [x + w - t * 1.3, y + h / 2 - t / 2], [x + w - t * 0.6, y + h / 2], [x + w - t * 1.3, y + h / 2 + t / 2], [x + t * 1.3, y + h / 2 + t / 2]],
+  };
+  for (const k of 'abcdefg') {
+    const lit = on && segs.includes(k);
+    c.fillStyle = lit ? '#f4f7ff' : dim; c.beginPath(); P[k].forEach(([px, py], i) => { const sx = px - (py - y) * 0.08; i ? c.lineTo(sx, py) : c.moveTo(sx, py); }); c.closePath(); c.fill();
+  }
+}
+let dispBlink = 0, dispLastKey = '';
+function displayText() {
+  const s = ctrl.state;
+  if (s === 'OFF' || !plant.powered) return { txt: null };
+  const blinkOn = (dispBlink % 1) < 0.6, alt = (dispBlink % 2) < 1;
+  if (s === 'TEST') {
+    const k = ctrl.testStep, rpm = Math.round(Math.abs(wToRpm(plant.omega)));
+    if (k === 0) return { txt: '1888', colon: true, allOn: true };
+    if (k === 1 || k === 8) return { txt: String(rpm).padStart(4, ' ') };
+    if (k === 2 || k === 3) return { txt: String(Math.round(rpm / 10)).padStart(4, ' ') };
+    if (k === 9) return { txt: String(Math.round(plant.thermistor)).padStart(4, ' ') };
+    if (k === 12) return { txt: ctrl.opts.wifi ? ' C01' : '  nF' };
+    return { txt: String(Math.round(plant.freq * 10)).padStart(4, ' ') };
+  }
+  if (ctrl.freqCheck) return { txt: String(Math.round(plant.freq * 10)).padStart(4, ' ') };
+  if (s === 'ERROR') return blinkOn ? { txt: ctrl.error.padStart(4, ' ') } : { txt: '    ' };
+  if (ctrl.msg && alt) return { txt: ctrl.msg.padStart(4, ' ') };
+  if (ctrl.showTcl > 0) return { txt: ' tcL' };
+  if (s === 'END') return { txt: ' End' };
+  if (s === 'DELAY') return { time: ctrl.delayLeft / 60 };
+  if (s === 'IDLE' && ctrl.delayH > 0) return { time: ctrl.delayH * 60 };
+  if ((s === 'RUN' || s === 'PAUSE') && ctrl.step && ctrl.step.stage === 'sense' && ctrl.sensed.mass == null) return { txt: ' ---' };
+  if (ctrl.opts.ctrlLock && alt && (s === 'RUN' || s === 'PAUSE')) return { txt: '  CL' };
+  return { time: ctrl.remainMin };
+}
+function drawDisplay() {
+  const c = displayTex.userData.ctx, W = displayTex.userData.canvas.width, H = displayTex.userData.canvas.height;
+  const on = ctrl.state !== 'OFF' && plant.powered, test0 = ctrl.state === 'TEST' && ctrl.testStep === 0;
+  c.fillStyle = '#030304'; c.fillRect(0, 0, W, H);
+  const X = (u) => u * W, Y = (v) => v * H;
+  const printed = '#c9ccd1', ledOn = '#ffffff', ledOff = '#2a2b2e';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  // dividers
+  c.strokeStyle = '#3a3c40'; c.lineWidth = 2;
+  c.beginPath(); c.moveTo(X(0.18), Y(0.03)); c.lineTo(X(0.18), Y(0.78)); c.moveTo(X(0.82), Y(0.03)); c.lineTo(X(0.82), Y(0.78)); c.moveTo(0, Y(0.795)); c.lineTo(W, Y(0.795)); c.stroke();
+  for (const b of DISP_BTNS) {
+    const cx = X((b.x0 + b.x1) / 2);
+    const bottom = b.y0 >= 0.8;
+    if (b.led) { c.fillStyle = (on && b.led()) || test0 ? ledOn : ledOff; c.fillRect(cx - 22, Y(b.y0 + 0.035), 44, 6); }
+    c.fillStyle = b.id === 'steam' ? '#e86a60' : printed;
+    c.font = `600 ${H * (bottom ? 0.064 : 0.066)}px "Segoe UI", Arial`;
+    c.fillText(b.label, cx, Y(bottom ? (b.sub ? 0.875 : 0.9) : (b.y0 + b.y1) / 2 + 0.015));
+    if (b.sub) { c.font = `${H * 0.042}px Arial`; c.fillStyle = '#9fa3a8'; c.fillText(b.sub, cx, Y(bottom ? 0.95 : (b.y0 + b.y1) / 2 + 0.095)); }
+    if (bottom && b.x1 < 1) { c.fillStyle = '#3a3c40'; c.fillRect(X(b.x1) - 1, Y(0.84), 2, Y(0.12)); }
+  }
+  // status indicators: Sensing / Wash / Rinse / Spin
+  const stages = ['sense', 'wash', 'rinse', 'spin'], names = ['Sensing', 'Wash', 'Rinse', 'Spin'];
+  const curStage = ctrl.step ? (ctrl.step.stage || ctrl.stage) : null;
+  const curIdx = stages.indexOf(curStage);
+  stages.forEach((st, i) => {
+    const x = X(0.222 + i * 0.06);
+    let lit = false;
+    if (on && ctrl.stagesPlanned.has(st)) {
+      if (ctrl.state === 'RUN' || ctrl.state === 'PAUSE') { if (i > curIdx) lit = true; else if (i === curIdx) lit = ctrl.state === 'PAUSE' ? true : (dispBlink % 1) < 0.5; }
+      else if (ctrl.state === 'IDLE') lit = true;
+    }
+    c.fillStyle = lit || test0 ? ledOn : ledOff; c.fillRect(x - 16, Y(0.07), 32, 6);
+    c.fillStyle = printed; c.font = `${H * 0.036}px Arial`; c.fillText(names[i], x, Y(0.15));
+  });
+  // icons: AI DD, door lock, Wi-Fi, remote start
+  const icons = [['AI', CYCLES[ctrl.cycle].aidd && ctrl.soil !== 'Heavy' || ctrl.mode === 'rinseSpin'], ['lock', plant.doorLocked], ['wifi', ctrl.opts.wifi], ['remote', ctrl.opts.remote]];
+  icons.forEach(([k, st], i) => {
+    const x = X(0.222 + i * 0.06), y = Y(0.29), col = (on && st) || test0 ? ledOn : '#55585d';
+    c.strokeStyle = col; c.fillStyle = col; c.lineWidth = 3;
+    if (k === 'AI') { c.strokeRect(x - 15, y - 13, 30, 26); c.font = `bold ${H * 0.05}px Arial`; c.fillText('AI', x, y + 1); }
+    if (k === 'lock') { c.strokeRect(x - 11, y - 3, 22, 16); c.beginPath(); c.arc(x, y - 3, 8, Math.PI, 0); c.stroke(); }
+    if (k === 'wifi') { for (const r of [6, 12, 18]) { c.beginPath(); c.arc(x, y + 10, r, -Math.PI * 0.75, -Math.PI * 0.25); c.stroke(); } }
+    if (k === 'remote') { c.beginPath(); c.arc(x, y, 13, 0, Math.PI * 2); c.stroke(); c.beginPath(); c.moveTo(x - 4, y - 6); c.lineTo(x + 5, y); c.lineTo(x - 4, y + 6); c.closePath(); c.fill(); }
+  });
+  // option LED grid: Temp / Spin / Soil / Signal
+  const cols = [
+    { x: 0.235, rows: ['Extra Hot', '', 'Warm', '', 'Tap Cold'], sel: TEMPS.indexOf(ctrl.temp) },
+    { x: 0.395, rows: ['Extra High', '', 'Medium', '', 'No Spin'], sel: SPINS.indexOf(ctrl.spin) },
+    { x: 0.555, rows: ['Heavy', '', 'Normal', '', 'Light'], sel: SOILS.indexOf(ctrl.soil) },
+    { x: 0.70, rows: ['Fresh Care', '', '', '', 'On/Off'], sel: -1 },
+  ];
+  cols.forEach((col, ci) => {
+    col.rows.forEach((label, ri) => {
+      const y = Y(0.44 + ri * 0.082);
+      let lit = on && col.sel === ri && ctrl.mode !== 'spinOnly' || (on && ctrl.mode === 'spinOnly' && ci === 1 && col.sel === ri);
+      if (ci === 3) lit = on && (ri === 0 ? ctrl.opts.fresh : ri === 4 ? ctrl.opts.signal : false);
+      if (ci === 3 && ri > 0 && ri < 4) return;
+      c.fillStyle = lit || test0 ? ledOn : ledOff; c.beginPath(); c.arc(X(col.x - 0.05), y, 5, 0, Math.PI * 2); c.fill();
+      if (label) { c.fillStyle = printed; c.font = `${H * 0.045}px Arial`; c.textAlign = 'left'; c.fillText(label, X(col.x - 0.038), y + 1); c.textAlign = 'center'; }
+    });
+  });
+  // 7-segment time / code
+  const dx = X(0.505), dy = Y(0.05), dw = X(0.066), dh = Y(0.27), gap = X(0.011), dim = '#141518';
+  const t = on ? displayText() : { txt: null };
+  let chars = ['', ' ', ' ', ' '], colon = false;
+  if (t.allOn) { chars = ['1', '8', '8', '8']; colon = true; }
+  else if (t.txt != null) { chars = t.txt.padStart(4, ' ').slice(-4).split(''); }
+  else if (t.time != null) { const m = Math.max(0, Math.ceil(t.time)); const h = Math.floor(m / 60), mm = m % 60; const hs = String(h).padStart(2, ' '); chars = [hs[0], hs[1], String(Math.floor(mm / 10)), String(mm % 10)]; colon = true; }
+  // first digit position is a half digit (only "1")
+  draw7(c, chars[0] === '1' ? '1' : ' ', dx - dw * 0.55, dy, dw * 0.55, dh, on, dim);
+  draw7(c, chars[1], dx + gap * 0.4, dy, dw, dh, on, dim);
+  c.fillStyle = on && colon ? '#f4f7ff' : dim; c.fillRect(dx + dw + gap * 1.45, dy + dh * 0.3, 7, 7); c.fillRect(dx + dw + gap * 1.45 - 2, dy + dh * 0.66, 7, 7);
+  draw7(c, chars[2], dx + dw + gap * 2.6, dy, dw, dh, on, dim);
+  draw7(c, chars[3], dx + dw * 2 + gap * 3.6, dy, dw, dh, on, dim);
+  displayTex.needsUpdate = true;
+}
+
+// ============================================================================
+// INTERACTION
+// ============================================================================
+const ui = { doorOpen: false, doorAngle: 0, drawerOpen: false, drawerPos: 0, coverOpen: false, coverAngle: 0, timeScale: 1, xray: false, camAnim: null, hover: null };
+const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2();
+const tip = $('tip');
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.opacity = 1; clearTimeout(toast._t); toast._t = setTimeout(() => t.style.opacity = 0, 3200); }
+function pick(e) {
+  const r = canvas.getBoundingClientRect();
+  pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(interactive, false);
+  return hits.find(h => h.object.visible) || null;
+}
+function displayButtonAt(uv) { const u = uv.x, v = 1 - uv.y; return DISP_BTNS.find(b => u >= b.x0 && u <= b.x1 && v >= b.y0 && v <= b.y1) || null; }
+function cycleLabelAt(uv) {
+  const x = PANEL_X0 + uv.x * (PANEL_X1 - PANEL_X0), y = yBand + uv.y * (PANEL_Y1 - yBand);
+  for (const [n, g] of Object.entries(cycleLabelGeom)) if (x >= g.x0 - 0.003 && x <= g.x1 + 0.003 && y >= g.y0 && y <= g.y1) return n;
+  return null;
+}
+let press = null;
+function pressAnim(grp) { if (!grp) return; grp.userData.cap.position.z = -0.0015; setTimeout(() => grp.userData.cap.position.z = 0, 140); }
+canvas.addEventListener('pointerdown', (e) => {
+  audioUnlock();
+  const h = pick(e); if (!h) return;
+  const a = h.object.userData.action;
+  controls.enabled = false;
+  press = { action: a, t0: performance.now(), hit: h, x: e.clientX, y: e.clientY, fired: false };
+  if (a === 'knob') { press.lastAng = Math.atan2(e.clientY - knobScreen().y, e.clientX - knobScreen().x); press.acc = 0; }
+  if (a === 'display') {
+    const b = displayButtonAt(h.uv); press.btn = b;
+    if (b) press.timer = setTimeout(() => { press.fired = true; handleButton(b.id, true); }, 3000);
+  }
+  canvas.setPointerCapture(e.pointerId);
+});
+function knobScreen() { const v = new THREE.Vector3(SPEC.knob.x, SPEC.knob.y, 0.03).applyMatrix4(washer.matrixWorld).project(camera); const r = canvas.getBoundingClientRect(); return { x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; }
+canvas.addEventListener('pointermove', (e) => {
+  if (press && press.action === 'knob') {
+    const k = knobScreen(), ang = Math.atan2(e.clientY - k.y, e.clientX - k.x);
+    let d = ang - press.lastAng; d -= Math.round(d / (Math.PI * 2)) * Math.PI * 2; press.lastAng = ang; press.acc += d;
+    knobGroup.userData.cap.rotation.z -= d;
+    while (press.acc > 0.42) { press.acc -= 0.42; knobTurn(1); press.fired = true; }
+    while (press.acc < -0.42) { press.acc += 0.42; knobTurn(-1); press.fired = true; }
+    return;
+  }
+  const h = pick(e);
+  let hint = h ? h.object.userData.hint : null;
+  if (h && h.object.userData.action === 'display') { const b = displayButtonAt(h.uv); hint = b ? `${b.label}${b.sub ? ' (hold 3 s: ' + b.sub.slice(1) + ')' : ''}` : null; }
+  if (h && h.object.userData.action === 'panel') { const n = cycleLabelAt(h.uv); hint = n ? `Select ${n}` : null; }
+  canvas.style.cursor = hint ? 'pointer' : 'default';
+  if (hint) { tip.style.display = 'block'; tip.textContent = hint; tip.style.left = e.clientX + 14 + 'px'; tip.style.top = e.clientY + 12 + 'px'; } else tip.style.display = 'none';
+});
+canvas.addEventListener('pointerup', (e) => {
+  controls.enabled = true;
+  if (!press) return;
+  const p = press; press = null; clearTimeout(p.timer);
+  const moved = Math.hypot(e.clientX - p.x, e.clientY - p.y) > 6;
+  if (p.fired) return;
+  switch (p.action) {
+    case 'power': pressAnim(SPEC.power.mesh); powerPress(); break;
+    case 'start': pressAnim(SPEC.start.mesh); startPress(); break;
+    case 'display': if (p.btn && !moved) handleButton(p.btn.id, false); break;
+    case 'panel': { const n = cycleLabelAt(p.hit.uv); if (n && !moved) { if (ctrl.state === 'OFF') break; if (ctrl.opts.ctrlLock || (ctrl.state !== 'IDLE' && ctrl.state !== 'END')) { audio.deny(); break; } ctrl.state = 'IDLE'; selectCycle(n); spinKnobTo(n); } break; }
+    case 'knob': if (!moved) knobTurn(1), spinKnobTo(ctrl.cycle); break;
+    case 'door': toggleDoor(); break;
+    case 'drawer': ui.drawerOpen = !ui.drawerOpen; break;
+    case 'draincover': ui.coverOpen = !ui.coverOpen; break;
+    case 'filter': if (ui.coverOpen) cleanFilter(); break;
+  }
+});
+canvas.addEventListener('wheel', (e) => { const h = pick(e); if (h && h.object.userData.action === 'knob') { e.preventDefault(); e.stopPropagation(); knobTurn(e.deltaY > 0 ? 1 : -1); spinKnobTo(ctrl.cycle); } }, { passive: false, capture: true });
+function spinKnobTo(n) { const i = CYCLE_ORDER.indexOf(n); knobGroup.userData.cap.rotation.z = -i * 0.42; }
+function toggleDoor() {
+  if (!ui.doorOpen && plant.doorLocked) { audio.deny(); toast('Door is locked'); return; }
+  ui.doorOpen = !ui.doorOpen;
+}
+function cleanFilter() {
+  if (ctrl.state === 'RUN') { toast('Stop the washer before opening the pump filter'); return; }
+  if (plant.V > 0.5) { toast(`Drained ${plant.V.toFixed(1)} L through the emergency drain tube first`); plant.V = 0; }
+  plant.drain.clog = false; $('chk-clog').checked = false; toast('Pump filter cleaned');
+}
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === ' ') { e.preventDefault(); audioUnlock(); startPress(); }
+  if (e.key === 'p' || e.key === 'P') { audioUnlock(); powerPress(); }
+  if (e.key === 'ArrowRight') { knobTurn(1); spinKnobTo(ctrl.cycle); }
+  if (e.key === 'ArrowLeft') { knobTurn(-1); spinKnobTo(ctrl.cycle); }
+  if (e.key === 'd' || e.key === 'D') toggleDoor();
+});
+let audioUnlocked = false;
+function audioUnlock() { if (!audioUnlocked) { audioUnlocked = true; } }
+
+// ============================================================================
+// HUD
+// ============================================================================
+document.querySelectorAll('[data-toggle]').forEach(h => h.addEventListener('click', () => $(h.dataset.toggle).classList.toggle('collapsed')));
+if (window.innerWidth < 900) { $('left').classList.add('collapsed'); $('right').classList.add('collapsed'); }
+for (const k of Object.keys(GARMENTS)) {
+  const b = document.createElement('button'); b.className = 'btn'; b.textContent = '+ ' + k;
+  b.onclick = () => addLaundry([k]); $('garment-buttons').appendChild(b);
+}
+function addLaundry(list) {
+  if (!ui.doorOpen) { toast('Open the door first (click the door or press D)'); return; }
+  if (ctrl.state === 'RUN') { toast('Pause the cycle first (or use Add Item)'); return; }
+  const total = laundry.items.reduce((s, i) => s + i.dry, 0);
+  for (const k of list) {
+    if (total + GARMENTS[k].dry > 11) { toast('Drum is full (≈ 11 kg / 24 lb dry max)'); break; }
+    const it = addGarment(k); it.soil = rand(0.35, 0.8); it.soilStart = it.soil;
+  }
+}
+$('btn-preset').onclick = () => addLaundry(['T-shirt', 'T-shirt', 'T-shirt', 'Jeans', 'Jeans', 'Bath towel', 'Bath towel', 'Bed sheet', 'Hoodie', 'Socks', 'Socks', 'Blouse']);
+$('btn-unbal').onclick = () => addLaundry(['Bath mat']);
+$('btn-unload').onclick = () => { if (!ui.doorOpen) { toast('Open the door first'); return; } if (ctrl.state === 'RUN') return; removeAllGarments(); };
+const bindRange = (id, out, fmt, fn) => { const el = $(id), o = $(out); const upd = () => { o.textContent = fmt(+el.value); fn(+el.value); }; el.addEventListener('input', upd); upd(); };
+const drawerFill = { det: 45, pre: 0, bleach: 0, soft: 0 };
+bindRange('s-det', 'o-det', v => `${v} mL`, v => drawerFill.det = v);
+bindRange('s-pre', 'o-pre', v => `${v} mL`, v => drawerFill.pre = v);
+bindRange('s-bleach', 'o-bleach', v => `${v} mL`, v => drawerFill.bleach = v);
+bindRange('s-soft', 'o-soft', v => `${v} mL`, v => drawerFill.soft = v);
+$('btn-fill-disp').onclick = () => {
+  if (!ui.drawerOpen) { ui.drawerOpen = true; }
+  Object.assign(plant.dispenser, { main: drawerFill.det, prewash: drawerFill.pre, bleach: drawerFill.bleach, softener: drawerFill.soft });
+  toast('Drawer filled');
+};
+$('chk-he').onchange = (e) => plant.he = e.target.checked;
+$('chk-cold').onchange = (e) => plant.supply.cold = e.target.checked;
+$('chk-hot').onchange = (e) => plant.supply.hot = e.target.checked;
+bindRange('s-psi', 'o-psi', v => `${v} psi`, v => plant.supply.psi = v);
+bindRange('s-hott', 'o-hott', v => `${v} °C`, v => plant.supply.hotT = v);
+bindRange('s-coldt', 'o-coldt', v => `${v} °C`, v => plant.supply.coldT = v);
+bindRange('s-hose', 'o-hose', v => `${v}″`, v => { plant.drain.heightIn = v; buildExternalHoses(v); });
+$('chk-kink').onchange = (e) => plant.drain.kink = e.target.checked;
+$('chk-clog').onchange = (e) => plant.drain.clog = e.target.checked;
+$('btn-clean-filter').onclick = () => { if (!ui.coverOpen) { ui.coverOpen = true; toast('Opened the filter cover — click again to clean'); return; } cleanFilter(); };
+for (const [id, key] of [['f-therm', 'therm'], ['f-press', 'press'], ['f-motor', 'motor'], ['f-doorsw', 'doorsw'], ['f-valve', 'valve'], ['f-vib', 'vib'], ['f-level', 'level']]) $(id).onchange = (e) => plant.faults[key] = e.target.checked;
+$('btn-power-cut').onclick = powerCut;
+$('btn-testmode').onclick = () => { audioUnlock(); if (ctrl.state === 'TEST') exitTest(); else enterTest(); };
+$('btn-freqcheck').onclick = () => { if (ctrl.state === 'OFF') { toast('Turn the washer on first'); return; } ctrl.freqCheck = !ctrl.freqCheck; };
+document.querySelectorAll('.ts').forEach(b => b.onclick = () => { ui.timeScale = +b.dataset.ts; document.querySelectorAll('.ts').forEach(x => x.classList.toggle('on', x === b)); });
+$('btn-sound').onclick = () => { audio.setEnabled(!audio.enabled); $('btn-sound').textContent = `Sound: ${audio.enabled ? 'on' : 'off'}`; $('btn-sound').classList.toggle('on', audio.enabled); };
+$('btn-xray').onclick = () => setXray(!ui.xray);
+function setXray(on) {
+  ui.xray = on; $('btn-xray').classList.toggle('on', on);
+  for (const m of xrayMats) { m.transparent = on; m.opacity = on ? 0.13 : 1; m.depthWrite = !on; m.needsUpdate = true; }
+  xrayHidden.forEach(o => o.visible = !on);
+  xrayOnly.forEach(o => o.traverse(m => { if (m.isMesh) m.visible = on; }));
+  MAT.tub.transparent = on; MAT.tub.opacity = on ? 0.38 : 1; MAT.tub.depthWrite = !on; MAT.tub.needsUpdate = true;
+}
+const CAMS = {
+  front: [[0, 0.62, 1.85], [0, 0.55, 0]],
+  panel: [[0.10, 1.08, 0.58], [0.09, 0.92, 0]],
+  drum: [[0.0, 0.62, 0.62], [0, 0.55, -0.2]],
+  side: [[1.25, 1.15, 1.55], [0, 0.5, -0.3]],
+  back: [[-0.9, 1.4, -0.05], [0.05, 0.6, -0.6]],
+};
+document.querySelectorAll('.cam').forEach(b => b.onclick = () => { const [p, t] = CAMS[b.dataset.cam]; ui.camAnim = { p: new THREE.Vector3(...p), t: new THREE.Vector3(...t), k: 0 }; });
+
+// ---- strip charts (single series each; one axis per chart) ----
+const charts = {};
+function makeChart(id, valId, fmt, minSpan) {
+  const cv = $(id), ctx = cv.getContext('2d');
+  const ch = { cv, ctx, data: [], valEl: $(valId), fmt, minSpan, hover: null };
+  cv.addEventListener('pointermove', (e) => { const r = cv.getBoundingClientRect(); ch.hover = (e.clientX - r.left) / r.width; });
+  cv.addEventListener('pointerleave', () => ch.hover = null);
+  charts[id] = ch; return ch;
+}
+makeChart('c-rpm', 'c-rpm-v', v => v.toFixed(0), 60);
+makeChart('c-freq', 'c-freq-v', v => v.toFixed(2), 0.6);
+makeChart('c-temp', 'c-temp-v', v => v.toFixed(1), 10);
+const CHART_WINDOW = 900; // seconds of sim time shown
+let chartSampleT = 0;
+function sampleCharts(simT) {
+  if (simT - chartSampleT < 0.5) return; chartSampleT = simT;
+  const push = (id, v) => { const d = charts[id].data; d.push([simT, v]); while (d.length && d[0][0] < simT - CHART_WINDOW) d.shift(); };
+  push('c-rpm', Math.abs(wToRpm(plant.omega))); push('c-freq', plant.freq); push('c-temp', Math.max(-5, plant.thermistor));
+}
+function drawChart(ch) {
+  const { cv, ctx, data } = ch, dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = cv.clientWidth, h = cv.clientHeight; if (!w) return;
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+  let lo = Infinity, hi = -Infinity; for (const [, v] of data) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  if (hi - lo < ch.minSpan) { const m = (hi + lo) / 2; lo = m - ch.minSpan / 2; hi = m + ch.minSpan / 2; }
+  const pad = 4, t1 = data[data.length - 1][0], t0 = t1 - CHART_WINDOW;
+  const X = (t) => pad + (t - t0) / CHART_WINDOW * (w - pad * 2), Yv = (v) => h - pad - (v - lo) / (hi - lo) * (h - pad * 2);
+  ctx.strokeStyle = '#34342f'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(pad, Yv((lo + hi) / 2)); ctx.lineTo(w - pad, Yv((lo + hi) / 2)); ctx.stroke();
+  ctx.fillStyle = '#8d8c84'; ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText(ch.fmt(hi), pad + 2, 11); ctx.fillText(ch.fmt(lo), pad + 2, h - 6);
+  ctx.strokeStyle = '#3987e5'; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
+  data.forEach(([t, v], i) => i ? ctx.lineTo(X(t), Yv(v)) : ctx.moveTo(X(t), Yv(v))); ctx.stroke();
+  if (ch.hover != null) {
+    const tt = t0 + ch.hover * CHART_WINDOW; let best = data[0]; for (const d of data) if (Math.abs(d[0] - tt) < Math.abs(best[0] - tt)) best = d;
+    const x = X(best[0]), y = Yv(best[1]);
+    ctx.strokeStyle = '#8d8c84'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    ctx.fillStyle = '#1a1a19'; ctx.strokeStyle = '#3987e5'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 4, 0, 7); ctx.fill(); ctx.stroke();
+    const label = `${ch.fmt(best[1])} · −${Math.round(t1 - best[0])} s`; ctx.font = '11px system-ui'; const tw = ctx.measureText(label).width + 8;
+    const lx = clamp(x + 6, 0, w - tw); ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(lx, 2, tw, 15); ctx.fillStyle = '#fff'; ctx.fillText(label, lx + 4, 13);
+  }
+  ch.valEl.textContent = ch.fmt(data[data.length - 1][1]);
+}
+function updateHUD(simT) {
+  const p = plant, set = (id, v) => { const el = $(id); if (el.textContent !== v) el.textContent = v; };
+  const hh = Math.floor(simT / 3600), mm = Math.floor(simT / 60) % 60, ss = Math.floor(simT) % 60;
+  set('clock', `sim ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}${ctrl.step && ctrl.step.slow && ui.timeScale > 4 ? ' (sensing ≤4×)' : ''}`);
+  set('d-state', ctrl.state + (ctrl.mode && ctrl.mode !== 'cycle' ? ` · ${ctrl.mode}` : '') + (ctrl.state !== 'OFF' ? ` · ${ctrl.cycle}` : ''));
+  set('d-proc', ctrl.state === 'TEST' ? `Test ${ctrl.testStep}: ${TEST_STEPS[ctrl.testStep]}` : ctrl.step ? ctrl.step.name : '—');
+  set('d-motion', ctrl.state === 'RUN' && ctrl.step && /Wash|Rinse|Pre-wash|Heating|supply/.test(ctrl.step.name) ? ctrl.motion.name : '—');
+  set('d-remain', ctrl.state === 'RUN' || ctrl.state === 'PAUSE' || ctrl.state === 'IDLE' ? fmtMin(ctrl.remainMin) : '—');
+  const err = $('d-err'); const e = ctrl.state === 'ERROR' ? `${ctrl.error} – ${ERR_TEXT[ctrl.error]}` : ctrl.offError ? `last: ${ctrl.offError}` : 'none';
+  set('d-err', e); err.className = ctrl.state === 'ERROR' ? 'err-text' : '';
+  set('d-rpm', `${Math.round(wToRpm(p.omega))} / ${Math.round(wToRpm(p.mode === 'speed' ? p.omegaRef : 0))} rpm`);
+  set('d-torque', `${p.torque.toFixed(1)} N·m`); set('d-power', `${Math.round(p.power)} W`);
+  set('d-slot', `${Math.round(SPEC.motor.slots * Math.abs(wToRpm(p.omega)) / 60)} Hz`);
+  set('d-g', `${(p.omega * p.omega * DR.R / 9.81).toFixed(1)} g`);
+  set('d-inertia', ctrl.sensed.J != null ? `${ctrl.sensed.J.toFixed(3)} kg·m²` : '—');
+  set('d-mass', ctrl.sensed.mass != null ? `${ctrl.sensed.mass.toFixed(1)} kg (actual ${laundry.items.reduce((s, i) => s + i.dry, 0).toFixed(1)} kg dry)` : '—');
+  set('d-fabric', ctrl.sensed.fabric ? `${{ thick: 'Thick / absorbent', mixed: 'Mixed', soft: 'Soft / synthetic' }[ctrl.sensed.fabric]} (+${(ctrl.sensed.ratio * 100).toFixed(0)}% wet)` : '—');
+  set('d-unb', ctrl.lastU != null ? `${(ctrl.lastU * 1000).toFixed(0)} g·m` : '—');
+  set('d-vib', `${(p.tub.amp * 1000).toFixed(1)} mm · ${p.vibG.toFixed(2)} g`);
+  set('d-limit', ctrl.spinLimitRpm != null ? `${ctrl.spinLimitRpm} rpm${ctrl.ueFlag ? ' (UE)' : ''}` : 'none');
+  set('d-vol', `${p.V.toFixed(1)} L · level ${(p.level * 1000).toFixed(0)} mm`);
+  set('d-held', `${heldWater().toFixed(1)} L`);
+  set('d-head', `${p.head.toFixed(0)} mm${p.sudsHead > 1 ? ` (+${p.sudsHead.toFixed(0)} suds)` : ''}`);
+  set('d-valves', ['pre', 'main', 'hot', 'bleach'].map(k => p.valves[k] || (k === 'main' && p.faults.valve) ? '●' : '·').join(' ') + (p.softPath ? ' (softener)' : ''));
+  set('d-in', `${p.inflow.toFixed(1)} L/min`);
+  set('d-pump', p.pumpOn ? `on · ${p.outflow.toFixed(1)} L/min${p.pumpDry ? ' (air)' : ''}` : 'off');
+  set('d-circ', p.circOn ? 'on (TurboWash jets)' : 'off');
+  set('d-heat', p.heaterOn ? 'ON' : p.heaterCmd ? 'requested (interlock: level)' : 'off');
+  set('d-suds', p.suds.toFixed(2));
+  const liq = Math.max(1, p.V + heldWater());
+  set('d-det', `${(p.det / liq).toFixed(2)} mL/L`); set('d-soil', `${(p.soil / liq).toFixed(2)} g/L`);
+  set('d-used', `${p.waterUsed.toFixed(1)} L`); set('d-energy', `${p.energyWh.toFixed(0)} Wh`);
+  set('d-door', ui.doorAngle > 0.02 ? 'open' : p.faults.doorsw ? 'closed (switch fault)' : 'closed');
+  set('d-lock', p.doorLocked ? 'locked' : p.lockCmd ? 'locking…' : 'unlocked');
+  // garment list
+  const gl = $('garment-list');
+  const html = laundry.items.map(it => {
+    const wet = it.water / (it.dry * it.absorb);
+    return `<div class="g"><span class="sw" style="background:${it.color}"></span><span>${it.type}</span><span class="meta">${(it.dry + it.water).toFixed(2)} kg · wet ${(wet * 100).toFixed(0)}% · soil ${(it.soil * 100).toFixed(0)}%</span></div>`;
+  }).join('');
+  if (gl._h !== html) { gl.innerHTML = html; gl._h = html; }
+  set('load-total', `Load: ${laundry.items.reduce((s, i) => s + i.dry, 0).toFixed(1)} kg dry · ${laundry.items.length} items`);
+  for (const ch of Object.values(charts)) drawChart(ch);
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+springGeo.translate(0, -0.5, 0);
+let simTime = 0, last = performance.now(), hudT = 0, dispT = 0;
+const _a = new THREE.Vector3(), _b = new THREE.Vector3();
+selectCycle('Normal', true); ctrl.state = 'OFF';
+spinKnobTo('Normal');
+function frame(now) {
+  const dtReal = Math.min(0.05, (now - last) / 1000); last = now;
+  stepAll(dtReal, now);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+function stepAll(dtReal, now) {
+  // ---- simulated time (controller + plant) ----
+  const scale = ctrl.step && ctrl.step.slow ? Math.min(ui.timeScale, 4) : ui.timeScale;
+  const simDt = dtReal * scale; const n = Math.max(1, Math.ceil(simDt / 0.05)), h = simDt / n;
+  plant.Jload = clothOut.J; plant.tauLoad = clothOut.tau;
+  plant.doorClosed = ui.doorAngle < 0.02;
+  for (let i = 0; i < n; i++) {
+    ctrlUpdate(h); plantStep(h); simTime += h; sampleCharts(simTime);
+  }
+  // ---- real-time mechanics & visuals ----
+  const clothReps = Math.max(1, Math.min(4, Math.round(scale)));
+  drumState.omegaVis = plant.omega;
+  for (let r = 0; r < clothReps; r++) { clothStep(dtReal); drumState.phi = (drumState.phi + plant.omega * dtReal) % (Math.PI * 2); }
+  drum.rotation.z = drumState.phi; drum.userData.rotor.rotation.z = drumState.phi;
+  suspensionStep(dtReal * clothReps, clothOut.Ux, clothOut.Uy, drumState.phi);
+  tubPivot.position.set(tubBase.x + plant.tub.x, tubBase.y + plant.tub.y, tubBase.z);
+  washer.position.set(plant.cab.x + plant.cab.walkX, Math.max(0, plant.cab.y), plant.cab.walkZ);
+  washer.rotation.z = plant.cab.rock;
+  tubPivot.updateMatrix();
+  for (const s of SUSP.springs) { _a.copy(s.tubLocal).applyMatrix4(tubPivot.matrix); between(s.mesh, s.cab, _a); }
+  for (const d of SUSP.dampers) { _a.copy(d.tubLocal).applyMatrix4(tubPivot.matrix); _b.copy(d.cab).lerp(_a, 0.62); between(d.body, d.cab, _b); _b.copy(d.cab).lerp(_a, 0.4); between(d.rod, _b, _a); }
+  updatePool(dtReal); updateDrops(dtReal); updateGarmentMeshes();
+  // door / drawer / filter cover animation
+  ui.doorAngle = smooth(ui.doorAngle, ui.doorOpen ? 1.72 : 0, 5, dtReal); if (!ui.doorOpen && ui.doorAngle < 0.003) ui.doorAngle = 0;
+  doorPivot.rotation.y = -ui.doorAngle;
+  ui.drawerPos = smooth(ui.drawerPos, ui.drawerOpen ? 0.2 : 0, 6, dtReal); drawerGroup.position.z = ui.drawerPos;
+  ui.coverAngle = smooth(ui.coverAngle, ui.coverOpen ? 1.35 : 0, 6, dtReal); drainCoverPivot.rotation.x = ui.coverAngle;
+  for (const [k, m] of Object.entries(dispenserLiquids)) { const cap = { main: 90, prewash: 80, bleach: 120, softener: 80 }[k]; const f = clamp(plant.dispenser[k] / cap, 0, 1); m.scale.y = Math.max(0.0001, f * 0.032); m.position.y = -0.043 + f * 0.016; }
+  drum.userData.heaterGlow.opacity = ui.xray && plant.heaterOn ? 0.55 + 0.2 * Math.sin(now / 200) : 0;
+  drumLight.position.copy(new THREE.Vector3(0, DC.cy + 0.05, -0.08)).add(washer.position);
+  drumLight.intensity = ui.xray ? 0.4 : 1.6;
+  // knob LEDs
+  const lit = ctrl.state !== 'OFF' && plant.powered;
+  for (const led of knobLEDs) led.material.color.setHex(lit && led.userData.cycle === ctrl.cycle ? 0xffffff : 0x222222);
+  // display & HUD
+  dispBlink += dtReal; dispT += dtReal; hudT += dtReal;
+  if (dispT > 0.05) { dispT = 0; if (ctrl.state === 'RUN' || ctrl.state === 'PAUSE' || ctrl.state === 'IDLE') ctrl.remainMin = estimateRemaining(); drawDisplay(); }
+  if (hudT > 0.12) { hudT = 0; updateHUD(simTime); }
+  audio.update({ rpm: wToRpm(plant.omega), torque: plant.torque, powered: plant.powered, motorOn: plant.mode === 'speed', inflow: plant.inflow, slosh: POOL.energy * 40 + (plant.V > 1 && Math.abs(plant.omega) > 1 && Math.abs(plant.omega) < 9 ? 0.15 : 0), pumpOn: plant.pumpOn && plant.powered, pumpDry: plant.pumpDry, circOn: plant.circOn });
+  // camera animation
+  if (ui.camAnim) {
+    const a = ui.camAnim; a.k = Math.min(1, a.k + dtReal * 1.6);
+    camera.position.lerp(a.p, 0.12); controls.target.lerp(a.t, 0.12);
+    if (a.k >= 1) ui.camAnim = null;
+  }
+}
+window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+$('loading').style.display = 'none';
+toast('Press P or the power button · open the door (D) to load laundry · Space = Start/Pause');
+requestAnimationFrame(frame);
+// expose for debugging
+window.__washer = { advance(sec, dt = 1 / 30) { let t = 0, now = performance.now(); while (t < sec) { stepAll(dt, now); now += dt * 1000; t += dt; } return simTime; }, getSim: () => simTime, setCam(n) { const [p, t] = CAMS[n]; camera.position.set(...p); controls.target.set(...t); controls.update(); }, setXray, plant, ctrl, laundry, cloth, clothOut, LEVEL_TABLE, levelFromVolume, volumeAtFreq, addGarment, startPress, powerPress, ui, selectCycle, handleButton };
+</script>
+</body>
+</html>
