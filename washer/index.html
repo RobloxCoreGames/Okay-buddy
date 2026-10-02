@@ -186,6 +186,7 @@ label.chk input{accent-color:var(--accent)}
   <span class="muted">Speed</span>
   <button class="btn ts on" data-ts="1">1×</button><button class="btn ts" data-ts="5">5×</button><button class="btn ts" data-ts="20">20×</button><button class="btn ts" data-ts="60">60×</button>
   <span class="sep"></span>
+  <button class="btn" id="btn-walk" title="WASD to walk, drag to look, wheel to zoom, Q/E down/up, Shift to run">Walk</button>
   <button class="btn" id="btn-xray">X-ray</button>
   <button class="btn" id="btn-sound">Sound: off</button>
   <span class="sep"></span>
@@ -374,12 +375,13 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.03).texture;
 scene.environmentIntensity = 0.85;
 
-const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.02, 30);
+const camera = new THREE.PerspectiveCamera(36, window.innerWidth / window.innerHeight, 0.004, 40);
 camera.position.set(0.55, 1.25, 2.05);
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, 0.55, 0);
 controls.enableDamping = true; controls.dampingFactor = 0.08;
-controls.minDistance = 0.25; controls.maxDistance = 5; controls.maxPolarAngle = Math.PI * 0.53;
+controls.minDistance = 0.03; controls.maxDistance = 9; controls.maxPolarAngle = Math.PI * 0.53;
+controls.zoomSpeed = 1.6; controls.zoomToCursor = true; // mouse wheel zooms toward whatever is under the cursor
 controls.update();
 
 const hemi = new THREE.HemisphereLight(0xfff8ef, 0x6b6157, 0.55); scene.add(hemi);
@@ -2423,7 +2425,7 @@ let press = null;
 function pressAnim(grp) { if (!grp) return; grp.userData.cap.position.z = -0.0015; setTimeout(() => grp.userData.cap.position.z = 0, 140); }
 canvas.addEventListener('pointerdown', (e) => {
   audioUnlock();
-  const h = pick(e); if (!h) return;
+  const h = pick(e); if (!h) { if (walk.on) { walk.drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); } return; }
   const a = h.object.userData.action;
   controls.enabled = false;
   press = { action: a, t0: performance.now(), hit: h, x: e.clientX, y: e.clientY, fired: false };
@@ -2436,6 +2438,11 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 function knobScreen() { const v = new THREE.Vector3(SPEC.knob.x, SPEC.knob.y, 0.03).applyMatrix4(washer.matrixWorld).project(camera); const r = canvas.getBoundingClientRect(); return { x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; }
 canvas.addEventListener('pointermove', (e) => {
+  if (walk.drag) {
+    walk.yaw -= (e.clientX - walk.drag.x) * 0.0035 * (camera.fov / 60);
+    walk.pitch = clamp(walk.pitch - (e.clientY - walk.drag.y) * 0.0035 * (camera.fov / 60), -1.45, 1.45);
+    walk.drag = { x: e.clientX, y: e.clientY }; return;
+  }
   if (press && press.action === 'knob') {
     const k = knobScreen(), ang = Math.atan2(e.clientY - k.y, e.clientX - k.x);
     let d = ang - press.lastAng; d -= Math.round(d / (Math.PI * 2)) * Math.PI * 2; press.lastAng = ang; press.acc += d;
@@ -2452,7 +2459,8 @@ canvas.addEventListener('pointermove', (e) => {
   if (hint) { tip.style.display = 'block'; tip.textContent = hint; tip.style.left = e.clientX + 14 + 'px'; tip.style.top = e.clientY + 12 + 'px'; } else tip.style.display = 'none';
 });
 canvas.addEventListener('pointerup', (e) => {
-  controls.enabled = true;
+  walk.drag = null;
+  controls.enabled = !walk.on;
   if (!press) return;
   const p = press; press = null; clearTimeout(p.timer);
   const moved = Math.hypot(e.clientX - p.x, e.clientY - p.y) > 6;
@@ -2486,7 +2494,9 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'p' || e.key === 'P') { audioUnlock(); powerPress(); }
   if (e.key === 'ArrowRight') { knobTurn(1); spinKnobTo(ctrl.cycle); }
   if (e.key === 'ArrowLeft') { knobTurn(-1); spinKnobTo(ctrl.cycle); }
-  if (e.key === 'd' || e.key === 'D') toggleDoor();
+  if ((e.key === 'd' || e.key === 'D') && !walk.on) toggleDoor();
+  if (e.key === 'o' || e.key === 'O') toggleDoor();
+  if (e.key === 'v' || e.key === 'V') setWalk(!walk.on);
 });
 let audioUnlocked = false;
 function audioUnlock() { if (!audioUnlocked) { audioUnlocked = true; } }
@@ -2554,7 +2564,7 @@ const CAMS = {
   side: [[1.25, 1.15, 1.55], [0, 0.5, -0.3]],
   back: [[-0.9, 1.4, -0.05], [0.05, 0.6, -0.6]],
 };
-document.querySelectorAll('.cam').forEach(b => b.onclick = () => { const [p, t] = CAMS[b.dataset.cam]; ui.camAnim = { p: new THREE.Vector3(...p), t: new THREE.Vector3(...t), k: 0 }; });
+document.querySelectorAll('.cam').forEach(b => b.onclick = () => { setWalk(false); const [p, t] = CAMS[b.dataset.cam]; ui.camAnim = { p: new THREE.Vector3(...p), t: new THREE.Vector3(...t), k: 0 }; });
 
 // ---- strip charts (single series each; one axis per chart) ----
 const charts = {};
@@ -2647,6 +2657,58 @@ function updateHUD(simT) {
 // ============================================================================
 // MAIN LOOP
 // ============================================================================
+// ============================================================================
+// WALK MODE — first-person: WASD move, drag to look, wheel zooms (lens), Q/E crouch/rise
+// ============================================================================
+const walk = { on: false, yaw: 0, pitch: 0, keys: new Set(), drag: null, eye: 1.62, baseFov: 60 };
+window.addEventListener('keydown', (e) => { if (e.target.tagName !== 'INPUT') walk.keys.add(e.code); });
+window.addEventListener('keyup', (e) => walk.keys.delete(e.code));
+window.addEventListener('blur', () => walk.keys.clear());
+function setWalk(on) {
+  if (walk.on === on) return;
+  walk.on = on; $('btn-walk').classList.toggle('on', on);
+  controls.enabled = !on; ui.camAnim = null;
+  if (on) {
+    const d = new THREE.Vector3(); camera.getWorldDirection(d);
+    walk.yaw = Math.atan2(-d.x, -d.z); walk.pitch = Math.asin(clamp(d.y, -1, 1));
+    walk.eye = clamp(camera.position.y, 0.3, 2.1);
+    camera.fov = walk.baseFov; camera.updateProjectionMatrix();
+    toast('Walk: WASD move · drag to look · wheel zoom · Q/E down/up · Shift run · O door · V exit');
+  } else {
+    const d = new THREE.Vector3(); camera.getWorldDirection(d);
+    controls.target.copy(camera.position).addScaledVector(d, 1.2);
+    camera.fov = 36; camera.updateProjectionMatrix(); controls.update();
+  }
+}
+$('btn-walk').onclick = () => setWalk(!walk.on);
+canvas.addEventListener('wheel', (e) => {
+  if (!walk.on || e.defaultPrevented) return;
+  e.preventDefault();
+  camera.fov = clamp(camera.fov * Math.exp(e.deltaY * 0.0012), 4, 85); camera.updateProjectionMatrix();
+}, { passive: false });
+function walkStep(dt) {
+  if (!walk.on) return;
+  const k = walk.keys, run = k.has('ShiftLeft') || k.has('ShiftRight') ? 2.6 : 1.0;
+  const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
+  const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0);
+  const sp = 1.3 * run * dt;
+  const sy = Math.sin(walk.yaw), cy = Math.cos(walk.yaw);
+  const p = camera.position;
+  let nx = p.x + (-sy * fwd + cy * str) * sp, nz = p.z + (-cy * fwd - sy * str) * sp;
+  if (k.has('KeyE')) walk.eye += 0.9 * dt * run; if (k.has('KeyQ')) walk.eye -= 0.9 * dt * run;
+  walk.eye = clamp(walk.eye, 0.15, 2.3);
+  // room walls and the washer itself are solid
+  nx = clamp(nx, -1.5, 2.8); nz = clamp(nz, -0.74, 3.0);
+  const wx = washer.position.x, wz = washer.position.z, pad = 0.12;
+  if (walk.eye < 1.05 && nx > wx - HW - pad && nx < wx + HW + pad && nz > wz - D - pad && nz < wz + 0.07 + pad) {
+    // push out along the shallowest axis
+    const dx1 = nx - (wx - HW - pad), dx2 = (wx + HW + pad) - nx, dz1 = nz - (wz - D - pad), dz2 = (wz + 0.07 + pad) - nz;
+    const m = Math.min(dx1, dx2, dz1, dz2);
+    if (m === dx1) nx = wx - HW - pad; else if (m === dx2) nx = wx + HW + pad; else if (m === dz1) nz = wz - D - pad; else nz = wz + 0.07 + pad;
+  }
+  p.set(nx, walk.eye, nz);
+  camera.rotation.set(walk.pitch, walk.yaw, 0, 'YXZ');
+}
 springGeo.translate(0, -0.5, 0);
 let simTime = 0, last = performance.now(), hudT = 0, dispT = 0;
 const _a = new THREE.Vector3(), _b = new THREE.Vector3();
@@ -2655,7 +2717,7 @@ spinKnobTo('Normal');
 function frame(now) {
   const dtReal = Math.min(0.05, (now - last) / 1000); last = now;
   stepAll(dtReal, now);
-  controls.update();
+  if (walk.on) walkStep(dtReal); else controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
