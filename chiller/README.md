@@ -1,30 +1,41 @@
 # CH-1 Chiller Plant Simulator
 
-`index.html` is a single-file Three.js walk-through of a school mechanical room. It contains a physically simulated 250-ton split screw chiller: the evaporator and compressors are indoors, and an air-cooled condenser with 14 fans sits on the roof. Open the file in a desktop browser. Three.js loads from jsDelivr.
+`index.html` is a single-file Three.js walk-through of a school mechanical room with a physically simulated 250-ton split screw chiller. The compressor-chiller is indoors and its 14-fan air-cooled condenser is on the roof. Open the file in a desktop browser. Three.js loads from jsDelivr.
 
-## What is simulated
+## What the model is based on
 
-- **Refrigerant (R-134a), per circuit.** Saturation pressure, vapor density, latent heat, and liquid enthalpy and density come from curve fits to NIST data. The suction and condensing states come from mass and energy balances. Liquid inventory moves between the flooded cooler, the liquid line and the condenser, and that sets subcooling and sight-glass flashing.
-- **Twin-screw compressors.** The slide valve runs from 40% to 100% and is moved hydraulically by the loader solenoids. Built-in volume ratio depends on slide position, and the over- or under-compression mismatch costs both power and noise. Volumetric efficiency, shaft torque, discharge superheat and motor temperature are modelled, along with a motor-cooling solenoid.
-- **Wye-delta starting.** The induction motors use an equivalent-circuit model (torque and current versus slip). The 1M+S → 2M open transition runs on the real bus impedance, so the room lights dim twice on every start.
-- **Controls following the Carrier 30HXA controls manual.** Oil-pump prelube is 20 s, then the oil solenoid opens, then 15 s more. The EXV holds a 22 °F discharge superheat set point. A 30-second capacity algorithm does the staging, with the 90-s step delay, ramp loading, low-superheat, low-SST, high-SCT and low-EWT overrides. The 7 fans per circuit are switched by fan-cycling pressure and ambient switches. When the unit is disabled it runs a pumpdown.
-- **Field-programmed BAS.** The across-the-line primary pump starts first. The secondary pump's VFD ramps up 20 s later on differential-pressure control. Then the chiller enable closes. At stop, the VFD drops to minimum, the chiller pumps down, and the pump turns off after its off-delay.
-- **Water side and building.** The plant is primary/secondary with a decoupler, loop thermal mass, AHU coil valves and a building zone with a daily outdoor-air cycle.
-- **Sound.** All of it is synthesized from simulator state with Web Audio and positioned in 3D. The compressor roar follows slide-valve bypass and pulsation, and its tone tracks the 4-lobe rotor passing frequency. The VFD whine tracks output frequency. Contactors, solenoids and the pump start each have their own sound.
+The real plant is a Trane split system: an indoor evaporator with two screw compressors and a Trane remote condenser on the roof. That matches Trane's **Model RTUD** compressor-chiller: 80–250 tons, two helical-rotary compressors (one per circuit) and an evaporator, piped to a remote air-cooled condenser with 2–8 fans per circuit, running Tracer CH530 controls. The sequences below follow Trane's installation and operation manual for that unit (RLC-SVX09K-EN).
+
+**From the Trane manual:**
+- **Stopped → Starting:** Auto energizes the evaporator pump relay, then flow is confirmed (6 s filter). After a call for cooling (differential to start), the chiller waits for oil (up to 2 min), pre-positions the EXV (≤ 15–20 s), sets condenser fan pre-flow by outdoor temperature, then starts the lead compressor.
+- **Wye-delta closed-transition starter:** the transition happens when motor current falls below 85% RLA (motor up to speed), or when the maximum acceleration timer runs out.
+- **Capacity:** each compressor starts at minimum (unload solenoid on). It then steps to its step-load point with the female-step solenoid, and the slide valve modulates above that with load/unload solenoids. Capacity-control softload applies.
+- **Limits and overrides:** "Establishing Min Cap – Low Diff Pressure", the hot-start limit, high condenser pressure limit, low evaporator refrigerant temperature limit, and current limit.
+- **EXV:** controls the **evaporator liquid level**, with an override for low evaporator pressure.
+- **Normal shutdown:** a 5 s run-unload, then an operational pumpdown (only below 50 °F outdoors or EWT + 5 °F; 2 min max), compressor off, condenser fans off, then the evaporator pump off-delay before the pump relay opens.
+- **Restart:** restart inhibit, balanced starts/hours lead-lag, and the differential to start/stop set points.
+- **Protections:** low refrigerant temperature cutout (28.6 °F), low leaving water cutout (36 °F), high pressure cutout and loss of flow.
+
+**Inferred from field observation (not in the Trane manual):**
+- **The BAS program:** it enables the chiller and starts the secondary-pump VFD after CHWP-1 is proven. On unoccupied it drops the VFD to 20% and removes the chiller enable a minute later.
+- **What the VFD drives:** modelled as the secondary pump.
+- **Set points:** the condenser fan staging target, softload (120 s) and evaporator pump off-delay (2 min) are set to match what was heard.
+
+## Sound
+
+The compressor sound is synthesized, not sampled. It matches a recording of the real compressor running unloaded:
+- **Main tone:** a lobe-passing tone at 5 × shaft speed (≈298 Hz). The male rotor has 5 lobes.
+- **Harmonics:** strong odd harmonics (3rd −6 dB, 5th −19, 7th −30, 11th −39, 13th −40) and weak even ones.
+- **Flutter:** an amplitude flutter at the 7-lobe female rotor speed (≈42.6 Hz).
+- **Pump:** the chilled water pump's vane-pass tone (7 vanes × 29.7 Hz ≈ 208 Hz) comes from the same recording.
+
+When the step-load solenoid moves the compressor off minimum, the gas pulsation drops and the compressor gets much quieter.
 
 ## Things to click
 
 | Location | What it does |
 | --- | --- |
-| Chiller control box | Enable/Off/Remote switch, emergency switch, display module keys (scroll through points; ENTER on the last page resets alarms) |
-| Display module | Shows unit status, pressures, temperatures, discharge superheat, EXV position and loader state |
-| BAS touchscreen | Occupancy, CHW set point, outdoor-air override, sim speed (1–30×), roof condenser view, trends, alarms |
+| Unit control panel | Touch-screen operator display (Auto/Stop, reports per circuit, settings, diagnostics with reset) and the emergency stop |
+| BAS touchscreen | Occupancy, CHW set point, outdoor-air override, sim speed (1–30×), condenser fan view, trends, alarms |
 | Electrical | CHWP-1 HOA selector, VFD Hand/Off/Auto keys, CH-1 disconnect, MSB main breaker (blackout and restart), condenser fan disconnect |
-| Valves | Evaporator isolation valve (causes a flow-loss trip), liquid-line ball valves (starve a circuit) |
-
-## Sources
-
-- Carrier *30HXA,HXC076-271 Product Data* (Form 30HX-14PD): dimensions, unit layout, wye-delta option, remote-condenser requirements, minimum loop volume.
-- Carrier *30HXA,HXC076-271 Controls, Start-Up, Operation, Service and Troubleshooting* (Series 7): oil-pump and wye-delta sequence, EXV and discharge-superheat control, capacity algorithm and overrides, 09D fan-cycling switch settings, pumpdown, alarm codes.
-
-The real plant's start/stop timing was matched to field observations of the installed system. Which load the VFD drives was not known, so here it is modelled as the secondary distribution pump.
+| Valves | Evaporator isolation valve (loss of flow), liquid-line service ball valves (starve a circuit) |
