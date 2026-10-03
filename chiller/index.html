@@ -2248,7 +2248,7 @@ dom.addEventListener('pointermove', e => {
       player.pos.x += -Math.sin(player.yaw) * fwd * 0.5 + Math.cos(player.yaw) * side * 0.5;
       player.pos.z += -Math.cos(player.yaw) * fwd * 0.5 - Math.sin(player.yaw) * side * 0.5;
     } else {
-      player.yaw -= dx * 0.0042; player.pitch = clamp(player.pitch + dy * 0.0042, -1.35, 1.35);
+      player.yaw -= dx * 0.0042; player.pitch = clamp(player.pitch - dy * 0.0042, -1.35, 1.35);
     }
     moved += Math.abs(dx) + Math.abs(dy);
     prev.x = e.clientX; prev.y = e.clientY;
