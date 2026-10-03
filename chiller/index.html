@@ -1,0 +1,2420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Chiller Plant Simulator</title>
+<meta name="description" content="Walk-through 3D mechanical room with a physically simulated 250-ton split screw chiller (30HXA-pattern, R-134a), primary/secondary chilled water, VFD, BAS and a 14-fan roof condenser.">
+<style>
+:root{--bg:#1a1c1e}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);touch-action:none;-webkit-user-select:none;user-select:none}
+#app{position:fixed;inset:0}
+canvas#gl{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+// =====================================================================
+//  PLANT SIMULATION — 250-ton split screw chiller (30HXA-pattern)
+//  Pure JS, no DOM. All internal units SI: °C, kPa(abs), kg, kg/s, kW, s.
+// =====================================================================
+
+// ---- R-134a saturation correlations (least-squares fit to NIST data, -20..70 °C) ----
+const R134a = {
+  psat: T => Math.exp(14.65060697 - 2221.99761539 / (T + 247.64172105)),           // kPa abs
+  tsat: P => 2221.99761539 / (14.65060697 - Math.log(Math.max(P, 1))) - 247.64172105,
+  rhog: T => Math.exp(-7.14598e-5 * T * T + 0.0346726566 * T + 2.65427177),        // kg/m³ sat. vapor
+  rhol: T => -0.0145833 * T * T - 3.22295454 * T + 1296.8197,                      // kg/m³ sat. liquid
+  hfg:  T => -0.0045113636 * T * T - 0.7387348485 * T + 199.1998485,               // kJ/kg
+  hl:   T => 0.0021742424 * T * T + 1.3352272727 * T + 199.7566667,                // kJ/kg
+  cpv: 1.02, cpl: 1.40, k: 1.12,
+};
+const CPW = 4.186;                 // water kJ/kg·K
+const GPM = 0.06309;               // kg/s per US gpm (water)
+const C2F = c => c * 1.8 + 32;
+const F2C = f => (f - 32) / 1.8;
+const dC2dF = d => d * 1.8;
+const kPa2psig = p => p * 0.1450377 - 14.696;
+const psig2kPa = g => (g + 14.696) / 0.1450377;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const approach = (v, target, rate, dt) => {
+  const d = target - v, m = rate * dt;
+  return Math.abs(d) <= m ? target : v + Math.sign(d) * m;
+};
+const lag = (v, target, tau, dt) => v + (target - v) * (1 - Math.exp(-dt / Math.max(tau, 1e-6)));
+
+// ---------------------------------------------------------------------
+//  Squirrel-cage induction motor — equivalent-circuit torque/current
+//  per-unit: i(s) = 1/sqrt((r/s)^2 + x^2) ; t(s) = i^2 r / s
+//  Wye connection: line current & torque are 1/3 of delta values.
+// ---------------------------------------------------------------------
+class InductionMotor {
+  constructor({ name, poles = 2, ratedKW, ratedA, lra = 6, sRated = 0.012, J, mag = 0.32 }) {
+    this.name = name;
+    this.wSync = 2 * Math.PI * 60 / (poles / 2);
+    this.ratedKW = ratedKW; this.ratedA = ratedA;
+    this.Trated = ratedKW * 1000 / (this.wSync * (1 - sRated));
+    this.x = 1 / lra;
+    const a = (1 + Math.sqrt(1 - 4 * this.x * this.x)) / 2;  // r/s at rated point gives t = 1
+    this.r = a * sRated;
+    this.J = J; this.mag = mag;
+    this.w = 0; this.conn = 'off';           // off | wye | delta | gap
+    this.freq = 60;                          // supply frequency (VFD-fed motors change it)
+    this.voltScale = 1;                      // V/Hz for VFD
+    this.transient = 0;                      // reclosing transient multiplier
+    this.I = 0; this.T = 0; this.Pelec = 0; this.slip = 1;
+  }
+  get rpm() { return this.w * 60 / (2 * Math.PI); }
+  step(dt, Tload, Vpu) {
+    const wS = this.wSync * this.freq / 60;
+    let Te = 0, Ipu = 0;
+    if (this.conn === 'wye' || this.conn === 'delta') {
+      const kv = this.conn === 'wye' ? 1 / 3 : 1;
+      const s = wS > 1 ? clamp((wS - this.w) / wS, -0.2, 1) : 1;
+      this.slip = s;
+      const ss = Math.abs(s) < 1e-4 ? 1e-4 * Math.sign(s || 1) : s;
+      // frequency-scaled reactance (VFD at low Hz) — simple V/Hz model
+      const fpu = Math.max(this.freq / 60, 0.05);
+      const x = this.x * fpu;
+      const rr = this.r * (1 + 3.5 * Math.min(Math.abs(ss), 1));   // deep-bar effect
+      const i = 1 / Math.sqrt((rr / ss) ** 2 + x * x);
+      const v = Vpu * this.voltScale;
+      let t = (i * i * rr / ss) / fpu;
+      Te = kv * v * v * t * this.Trated;
+      Ipu = Math.hypot(kv * v * i, kv * v * this.mag);
+      Ipu *= 1 + this.transient;
+      this.transient *= Math.exp(-dt / 0.12);
+    } else {
+      this.slip = 1;
+    }
+    // load torque always opposes motion; friction keeps it from drifting
+    const Tl = this.w > 0.5 ? Tload : Math.min(Tload, Te) * 0.98;
+    this.w = Math.max(0, this.w + (Te - Tl) / this.J * dt);
+    this.T = Te; this.I = Ipu * this.ratedA;
+    this.Pelec = this.conn === 'off' || this.conn === 'gap' ? 0 : Math.max(0, Te * this.w / 1000 / 0.94) + 0.02 * this.ratedKW * (Ipu > 0 ? 1 : 0);
+  }
+}
+
+// ---------------------------------------------------------------------
+//  One refrigerant circuit: twin-screw compressor (06N-pattern), flooded
+//  cooler half, EXV, economizer, oil separator, discharge/liquid lines,
+//  7-fan air-cooled condenser section on the roof.
+// ---------------------------------------------------------------------
+class Circuit {
+  constructor(id, sim) {
+    this.id = id; this.sim = sim;
+    // --- compressor ---
+    this.Vd = 0.205;                      // m³/s swept at 3550 rpm (≈435 cfm, ~125 tons)
+    this.motor = new InductionMotor({ name: 'comp' + id, poles: 2, ratedKW: 160, ratedA: 225, lra: 6.0, sRated: 0.013, J: 0.80, mag: 0.30 });
+    this.w0 = this.motor.wSync * (1 - 0.013);
+    this.sv = 0.40;                        // slide-valve capacity position (0.40 … 1.00)
+    this.L1 = false; this.L2 = false;      // loader solenoids
+    this.oilSol = false; this.oilPump = false; this.oilHeater = true;
+    this.mcSol = false;                    // motor-cooling solenoid
+    this.c1M = false; this.cS = false; this.c2M = false;   // wye-delta contactors
+    this.llsv = false;                     // liquid line solenoid (field supplied)
+    this.exv = 0;                          // 0..1
+    this.exvTarget = 0;
+    this.running = false;                  // compressor commanded on (contactors)
+    this.state = 'OFF';                    // OFF | PRELUBE | STARTING | RUN | PUMPDOWN
+    this.tState = 0; this.tRun = 0;
+    this.startT = -1e9; this.stopT = -1e9; this.hours = id === 'A' ? 1520.4 : 1518.9; this.starts = id === 'A' ? 2311 : 2296;
+    this.oilDP = 0;                        // oil pressure - economizer pressure (kPa)
+    this.Tmotor = 30;                      // °C
+    this.oilT = 45;                        // °C oil sump (heater keeps it warm while off)
+    // --- refrigerant state ---
+    this.Mtot = 154;                       // kg charge in circuit
+    this.Mliq = 18;                        // kg liquid held in cooler (after last pumpdown)
+    this.MlineFill = 24;                   // liquid line volume to fill (kg)
+    this.Tsuc = 16;                        // saturated suction °C
+    this.Tcond = 26;                       // saturated condensing °C
+    this.Tdgt = 26;                        // discharge gas thermistor reading °C
+    this.Tdis = 26;
+    this.SC = 8; this.SSH = 0; this.DSH = 0; this.DSHmeas = 0;
+    this.mComp = 0; this.mExv = 0; this.Qevap = 0; this.Qcond = 0; this.Pshaft = 0;
+    this.PR = 1; this.PRint = 2.1; this.Vi = 2;
+    this.flash = 0;                        // liquid-line flashing 0..1 (sight glass bubbles)
+    this.carry = 0;
+    // --- condenser fans (7 per circuit) ---
+    this.fanCmd = new Array(7).fill(false);
+    this.fanSpd = new Array(7).fill(0);
+    this.fcps1 = false; this.fcps2 = false; this.ats = false;
+    // --- noise descriptors (for audio) ---
+    this.noise = { roar: 0, pulse: 0, mesh: 0, hum: 0, whine: 0 };
+    // --- control bookkeeping ---
+    this.pdStartSST = 0; this.pdT = 0;
+    this.lowSSTt = 0; this.alarm = null;
+    this.exvInt = 0; this.exvHoldUntil = 0;
+    this.mcLastSwitch = 0;
+    this.liquidValveOpen = 1;              // manual liquid-line service valve (fault injection)
+  }
+
+  get Psuc() { return R134a.psat(this.Tsuc); }
+  get Pcond() { return R134a.psat(this.Tcond); }
+  get L() { return clamp(this.Mliq / 140, 0, 1.2); }
+  get capPct() { return this.motor.w > 50 ? Math.round(this.sv * 100) : 0; }
+  get compOn() { return this.c1M; }
+
+  // ----- physics step -----
+  step(dt, ctx) {
+    const sim = this.sim;
+    const w = this.motor.w, wr = w / this.w0;
+    const Ps = this.Psuc, Pd = this.Pcond;
+    const dP = Math.max(Pd - Ps, 0);
+
+    // ---- slide valve hydraulics ----
+    const capTarget = 0.40 + (this.L1 ? 0.30 : 0) + (this.L2 ? 0.30 : 0);
+    if (capTarget > this.sv + 1e-4) {
+      // loading: oil pressure drives the slide piston — fast (~0.5 s for full stroke)
+      const oilOK = clamp(this.oilDP / 150, 0, 1);
+      this.sv = approach(this.sv, capTarget, 1.25 * oilOK * clamp(wr, 0, 1), dt);
+    } else if (capTarget < this.sv - 1e-4 && wr < 0.2) {
+      // stopped: return spring pushes the slide home as oil bleeds out of the piston — slow
+      const visc = clamp((this.oilT - 20) / 40, 0.15, 1);
+      this.sv = approach(this.sv, capTarget, 0.0012 * visc, dt);
+    } else if (capTarget < this.sv - 1e-4) {
+      // unloading: gas force on the slide bleeds oil back — needs rotation and pressure ratio
+      const f = clamp(wr, 0, 1) * clamp((dP - 120) / 520, 0, 1.2) ** 2;
+      this.sv = approach(this.sv, capTarget, 0.17 * f, dt);
+    }
+    this.Vi = 2.0 + 1.2 * (this.sv - 0.4) / 0.6;
+    this.PRint = Math.pow(this.Vi, R134a.k);
+    this.PR = Pd / Ps;
+
+    // ---- cooler level effects ----
+    const L = this.L;
+    this.SSH = clamp((0.42 - L) * 40, 0, 12);                  // exposed tubes superheat suction gas
+    this.carry = clamp((L - 0.50) * 0.12, 0, 0.08);             // liquid carry-over (froth) when overfed
+    const wet = clamp(0.08 + 1.84 * L, 0.05, 1.0);
+
+    // ---- compressor flow & work ----
+    const rhoS = R134a.rhog(this.Tsuc) * (273.15 + this.Tsuc) / (273.15 + this.Tsuc + this.SSH);
+    const etaV = clamp(0.965 - 0.022 * (this.PR - 1) - 0.06 * (1 - this.sv), 0.3, 0.97);
+    const Vdot = this.Vd * clamp(wr, 0, 1.05) * this.sv * etaV;
+    this.mComp = rhoS * Vdot;
+    const k = R134a.k;
+    const vS = 1 / rhoS;
+    const wIs = (k / (k - 1)) * Ps * vS * (Math.pow(Math.max(this.PR, 1), (k - 1) / k) - 1); // kJ/kg
+    const mis = this.PR - this.PRint;
+    const wMis = mis > 0 ? Ps * vS * mis / this.Vi : Ps * vS * (-mis) / this.Vi * 0.35;       // Vi mismatch loss
+    const etaIs = 0.83 - 0.10 * (1 - this.sv) / 0.6;
+    const wAct = wIs / etaIs + wMis;
+    const Pfric = 4.5 * wr * wr + 1.0 * wr;
+    this.Pshaft = this.mComp * wAct + Pfric;
+    const Tload = w > 5 ? this.Pshaft * 1000 / w : 15;
+    this.motor.step(dt, Tload, sim.elec.V);
+
+    // ---- discharge superheat ----
+    const mcCool = this.mcSol ? 3.0 : 0;
+    const dshDry = 0.30 * Math.max(this.Tcond - this.Tsuc, 0) + 0.75 * this.SSH + 5.5 * (wMis / Math.max(wIs, 1)) + 3.0 * (1 - this.sv) - mcCool + 2.0;
+    this.DSH = this.mComp > 0.05 ? Math.max(dshDry - 620 * this.carry, -2) : 0;
+    const tdTarget = this.mComp > 0.05 ? this.Tcond + this.DSH : lerp(this.Tdgt, sim.roomT, 0.0);
+    if (this.mComp > 0.05) this.Tdis = lag(this.Tdis, tdTarget, 6, dt);
+    else this.Tdis = lag(this.Tdis, sim.roomT, 900, dt);
+    this.Tdgt = lag(this.Tdgt, this.Tdis, 14, dt);              // thermistor in muffler well
+    this.DSHmeas = this.Tdgt - this.Tcond;
+
+    // ---- liquid line / EXV ----
+    const Mcl = this.Mtot - this.Mliq - this.MlineFill;         // liquid stacked in condenser
+    this.SC = clamp((Mcl - 30) * 0.35, -12, 16);
+    // economizer subcooling (brazed plate, active whenever comp runs)
+    const econ = this.mComp > 0.3 ? 7.5 * clamp(this.mComp / 2.8, 0, 1) : 0;
+    const Tliq = this.Tcond - Math.max(this.SC, 0) - econ;
+    this.flash = clamp(-this.SC / 6, 0, 1);
+    // liquid head: condenser on roof ~6 m above EXV
+    const rhoL = R134a.rhol(Tliq);
+    const dPexv = Pd + rhoL * 9.81 * 6.0 / 1000 - 25 - Ps;
+    this.exv = approach(this.exv, this.exvTarget, 0.035, dt);  // stepper ~3.5 %/s
+    const valveOpen = (this.llsv ? 1 : 0) * this.liquidValveOpen;
+    this.mExv = valveOpen * 0.0052 * this.exv * Math.sqrt(Math.max(dPexv, 0) * rhoL) / (1 + 0.35 * Math.max(-this.SC, 0));
+    const hIn = R134a.hl(Tliq) + (this.SC < 0 ? -this.SC * 1.6 : 0);
+    const hfgS = R134a.hfg(this.Tsuc);
+    const xIn = clamp((hIn - R134a.hl(this.Tsuc)) / hfgS, 0, 1);
+
+    // ---- cooler (flooded, water in tubes) ----
+    const half = sim.cooler[this.id];
+    const F = ctx.FpHalf;                                       // kg/s through this half
+    const UA = 78 * wet;                                        // kW/K at full wetting
+    let Q;
+    if (F > 0.5) {
+      const eps = 1 - Math.exp(-UA / (F * CPW));
+      Q = eps * F * CPW * (ctx.Tin - this.Tsuc);
+    } else {
+      Q = 6 * wet * (half.Tw - this.Tsuc);                      // stagnant water, natural convection
+    }
+    // compressor stopped: vessel is closed; temperature follows the water in the tubes
+    if (this.mComp < 0.05 && this.mExv < 0.01) Q = 6 * (half.Tw - this.Tsuc);
+    this.Qevap = Q;
+    const boil = Q / hfgS;                                       // kg/s vapor from boiling
+    const mVin = this.mExv * xIn + boil;
+    const mVout = this.mComp * (1 - this.carry);
+    this.Mliq = Math.max(0, this.Mliq + (this.mExv * (1 - xIn) - boil - this.mComp * this.carry) * dt);
+    const Ceff = 0.42 * 0.6 + (this.Mliq * R134a.cpl + 140) / hfgS;  // kg per K (vapor space + liquid & shell flash)
+    this.Tsuc += (mVin - mVout) / Ceff * dt;
+    this.Tsuc = clamp(this.Tsuc, -30, 60);
+
+    // ---- condenser on roof ----
+    const T_amb = sim.oat + 1.5;                                 // roof air a bit hotter than OAT
+    let UAc = 0.9;
+    for (let i = 0; i < 7; i++) {
+      this.fanSpd[i] = lag(this.fanSpd[i], this.fanCmd[i] && sim.condFanBreaker ? 1 : 0, this.fanCmd[i] ? 2.5 : 9, dt);
+      UAc += 5.1 * this.fanSpd[i];
+    }
+    this.Qcond = UAc * (this.Tcond - T_amb);
+    const qIn = this.mComp * (R134a.hfg(this.Tcond) + R134a.cpv * Math.max(this.DSH, 0) + R134a.cpl * Math.max(this.SC, 0));
+    const Ccond = 820;                                          // kJ/K coil + discharge line + vapor
+    this.Tcond += (qIn - this.Qcond) / Ccond * dt;
+    // condenser can't sit below the cooler while the system is open (EXV path equalises slowly)
+    if (this.Tcond < this.Tsuc && valveOpen > 0 && this.exv > 0.02) this.Tcond = lag(this.Tcond, this.Tsuc, 30, dt);
+
+    // ---- oil system ----
+    const pumpDP = this.oilPump ? 260 : 0;
+    const sysDP = this.oilSol && w > 50 ? Math.max(0, (Pd - Ps) * 0.55 - 40) : 0;
+    const tgt = this.oilSol || this.oilPump ? Math.max(pumpDP * (this.oilSol || !this.running ? 1 : 1), sysDP + pumpDP * 0.5) : 0;
+    this.oilDP = lag(this.oilDP, tgt, 1.2, dt);
+
+    // ---- oil temperature (heater when off, discharge-heated when running) ----
+    this.oilT = lag(this.oilT, this.running ? this.Tdis - 5 : (this.oilHeater ? 46 : sim.roomT), this.running ? 120 : 1800, dt);
+    this.oilHeater = !this.running;
+    // ---- motor temperature ----
+    const loss = this.motor.Pelec * 0.06 + (this.motor.I > 2 * this.motor.ratedA ? 6 : 0);
+    const cool = (this.mComp * 6 + 0.25) * (this.Tmotor - this.Tsuc) / 10 + (this.mcSol ? 9 * (this.Tmotor - this.Tsuc) / 40 : 0) + 0.05 * (this.Tmotor - sim.roomT);
+    this.Tmotor += (loss - cool) / 95 * dt;
+
+    // ---- noise descriptors ----
+    const wr2 = wr * wr;
+    const u = clamp((1 - this.sv) / 0.6, 0, 1);
+    const byp = u * Math.sqrt(dP / 700) * clamp(rhoS / 16, 0, 2) * wr2;
+    const puls = Math.abs(mis) / this.PRint * wr2;
+    this.noise.roar = 0.22 * wr2 * (0.6 + 0.4 * this.mComp / 2.8) + 0.95 * byp + 0.25 * puls;
+    this.noise.pulse = 0.18 * wr2 + 0.8 * puls + 0.35 * byp;
+    this.noise.mesh = 0.25 * wr2;
+    const v = sim.elec.V;
+    this.noise.hum = this.motor.conn === 'delta' ? 0.35 * v : this.motor.conn === 'wye' ? 0.12 * v : 0;
+    this.noise.lobeHz = 4 * this.motor.rpm / 60;               // 4-lobe male rotor
+    this.noise.rotHz = this.motor.rpm / 60;
+  }
+}
+
+// ---------------------------------------------------------------------
+//  The whole plant
+// ---------------------------------------------------------------------
+class Plant {
+  constructor() {
+    this.t = 0;                            // sim seconds since start
+    this.clock = 6 * 3600 + 58 * 60 + 40;  // time of day (s) — 06:58:40
+    this.events = [];                      // {type, src, gain}
+    this.oat = F2C(80); this.oatOffset = 0; this.oatManual = null;
+    this.roomT = F2C(82);
+    this.condFanBreaker = true;
+    this.mainBreaker = true; this.chillerDisc = true;
+    this.ctlPowered = true; this.ctlBoot = 0; this.basPowered = true; this.basBoot = 0;
+    this.elec = { V: 1, Vslow: 1, I: 0, light: 1, base: 160 };
+
+    // --- circuits & cooler ---
+    this.A = new Circuit('A', this);
+    this.B = new Circuit('B', this);
+    this.circuits = [this.A, this.B];
+    this.cooler = { A: { Tw: F2C(64) }, B: { Tw: F2C(64) } };
+    this.lwtSensor = F2C(64); this.ewtSensor = F2C(64);
+
+    // --- primary chilled water pump (constant speed, across-the-line) ---
+    this.P1 = { motor: new InductionMotor({ name: 'P1', poles: 4, ratedKW: 11.2, ratedA: 21, lra: 6.5, sRated: 0.025, J: 0.11, mag: 0.4 }),
+                hoa: 'AUTO', cmd: false, flow: 0, contactor: false };
+    // --- secondary distribution pump on VFD ---
+    this.P2 = { motor: new InductionMotor({ name: 'P2', poles: 4, ratedKW: 18.6, ratedA: 34, lra: 6.5, sRated: 0.02, J: 0.25, mag: 0.4 }),
+                hoa: 'AUTO', run: false, hz: 0, hzCmd: 0, flow: 0 };
+    this.P2.motor.freq = 0;
+    this.vfd = { accel: 60 / 20, decel: 60 / 7, minHz: 12, maxHz: 60, I: 0, kW: 0, dcBus: 650, fault: null, running: false };
+    this.isoValve = 1; this.isoValveCmd = 1;   // evaporator CHW isolation valve (manual gear operator)
+    this.flowSwitch = false; this.fsT = 0;
+
+    // --- water loop & building ---
+    this.Tsup = F2C(64); this.Tret = F2C(65);   // supply & return mains (tank temps)
+    this.Tzone = F2C(76.5);
+    this.valve = 0;                            // aggregate AHU coil valve 0..1
+    this.valveInt = 0;
+    this.Qcoil = 0; this.Fp = 0; this.Fs = 0;
+    this.ahuOn = false; this.ahuSpd = 0;
+
+    // --- ComfortLink controller ---
+    this.ctl = {
+      switch: 'REMOTE',                  // ENABLE | OFF | REMOTE
+      estop: true,                       // emergency on/off switch (true = ON)
+      remote: false,                     // remote contact (from BAS)
+      setpoint: F2C(44),                 // CSP.1
+      stage: 0, smz: 0, tick: 2 + Math.random() * 28, lastStep: -999, lastLwt: F2C(64), rate: 0,
+      mode: 'OFF', pending: null, stopping: false, alarms: [], history: [],
+      lead: 'A', lastStageChangeReason: '', rampLimit: 1.0, zgain: 1.0,
+      loaderDelay: 30, capacityPct: 0, ctpt: F2C(44), startDelay: 0, dsMinOff: 0,
+    };
+    // --- BAS ---
+    this.bas = { mode: 'AUTO', occ: false, seq: 'OFF', t: 0, offDelay: 105, speedCmd: 0, dpSP: 12, dp: 0 };
+  }
+
+  get oatF() { return C2F(this.oat); }
+
+  ev(type, src, gain = 1) { this.events.push({ type, src, gain }); }
+
+  // ---------------- outdoor weather (daily curve) ----------------
+  updateWeather() {
+    const h = (this.clock / 3600) % 24;
+    const base = 77 + 13 * Math.sin((h - 9) / 24 * 2 * Math.PI) * (h > 5 && h < 21 ? 1 : 0.6);
+    const f = this.oatManual != null ? this.oatManual : base + this.oatOffset;
+    this.oat = F2C(f);
+  }
+
+  // ---------------- electrical bus ----------------
+  updateElectrical(dt) {
+    const e = this.elec;
+    let I = e.base + (this.ahuOn ? 38 * this.ahuSpd ** 3 : 0) + 6;
+    for (const c of this.circuits) I += c.motor.I + (c.oilPump ? 2.5 : 0);
+    I += this.P1.motor.I;
+    I += this.vfd.I * 0.95;
+    e.I = I;
+    const Z = 0.026;                        // ohms — service + transformer impedance at 277 V phase
+    e.V = this.mainBreaker ? 1 - I * Z / 277 : 0;
+    if (!this.mainBreaker) { e.I = 0; e.Vslow = lag(e.Vslow, 1, 1, dt); e.light = 0; return; }
+    e.Vslow = lag(e.Vslow, e.V, 6, dt);
+    // fluorescent output ≈ V^3 ; relative to slow-moving supply (what eyes notice)
+    const target = Math.pow(e.V / e.Vslow, 3.2);
+    e.light = lag(e.light, target, 0.035, dt);
+  }
+
+  // ---------------- water side ----------------
+  updateWater(dt) {
+    const P1 = this.P1, P2 = this.P2, vfd = this.vfd;
+    // valve operator moves slowly (gear handwheel)
+    this.isoValve = approach(this.isoValve, this.isoValveCmd, 1 / 12, dt);
+    const isoF = this.isoValve <= 0.02 ? 0 : Math.sqrt(this.isoValve) * (1 - 0.15 * (1 - this.isoValve));
+    // primary pump hydraulics: Q ∝ speed, loads motor with ρgQH/η
+    const n1 = P1.motor.w / (P1.motor.wSync * 0.975);
+    const Fp_target = 600 * GPM * clamp(n1, 0, 1.05) * isoF;
+    this.Fp = lag(this.Fp, Fp_target, 1.6, dt);
+    const H1 = 17.5 * n1 * n1;              // m head
+    const Tl1 = P1.motor.w > 1 ? (1000 * 9.81 * (this.Fp / 1000) * H1 / 0.70) / P1.motor.w + 2 * n1 : 2;
+    P1.motor.conn = P1.contactor && this.mainBreaker ? 'delta' : 'off';
+    P1.motor.step(dt, Tl1, this.elec.V);
+
+    // VFD + secondary pump
+    vfd.running = P2.run;
+    const hzTarget = P2.run ? clamp(P2.hzCmd, vfd.minHz, vfd.maxHz) : 0;
+    if (!this.mainBreaker) { P2.hz = 0; P2.run = false; }
+    else P2.hz = P2.hz < hzTarget ? approach(P2.hz, hzTarget, vfd.accel, dt) : approach(P2.hz, hzTarget, vfd.decel, dt);
+    const m2 = P2.motor;
+    m2.freq = P2.hz; m2.voltScale = clamp(P2.hz / 60, 0, 1) * 0.97 + (P2.hz > 0 ? 0.03 : 0);
+    m2.conn = P2.hz > 0.2 ? 'delta' : 'off';
+    const n2 = m2.w / (m2.wSync * 0.98);
+    const vEff = clamp(this.valve, 0.06, 1);
+    const Fs_target = 640 * GPM * clamp(n2, 0, 1.05) * Math.sqrt(vEff) * 1.02;
+    this.Fs = lag(this.Fs, Fs_target, 2.5, dt);
+    const H2 = 26 * n2 * n2;
+    const Tl2 = m2.w > 1 ? (1000 * 9.81 * (this.Fs / 1000) * H2 / 0.72) / m2.w + 1.5 * n2 : 1.5;
+    m2.step(dt, Tl2, this.elec.V);
+    vfd.kW = m2.Pelec / 0.97 + (P2.run ? 0.25 : 0.05);
+    vfd.I = vfd.kW * 1000 / (Math.sqrt(3) * 480 * this.elec.V * 0.95);
+    this.bas.dp = Math.max(0, H2 * 1.42 - 8 * (this.Fs / (640 * GPM)) ** 2 * 1.42) * 0.65; // psi at remote sensor (rough)
+
+    // flow switch (thermal dispersion) — slow to make, slower to drop
+    const proven = this.Fp > 0.45 * 600 * GPM;
+    if (proven !== this.flowSwitch) { this.fsT += dt; if (this.fsT > (proven ? 4.5 : 2.5)) { this.flowSwitch = proven; this.fsT = 0; this.ev('relay', 'flowswitch', 0.2); } }
+    else this.fsT = 0;
+
+    // ---- loop thermal network ----
+    const Fp = this.Fp, Fs = this.Fs;
+    const lwt = (this.cooler.A.Tw + this.cooler.B.Tw) / 2;
+    let Tevap_in, TsupIn;
+    if (Fp >= Fs) {
+      Tevap_in = Fp > 0.1 ? (Fs * this.Tret + (Fp - Fs) * lwt) / Fp : this.Tret;
+      TsupIn = lwt;
+    } else {
+      Tevap_in = this.Tret;
+      TsupIn = Fs > 0.1 ? (Fp * lwt + (Fs - Fp) * this.Tret) / Fs : this.Tsup;
+    }
+    this.Tevap_in = Tevap_in;
+    // cooler halves (water in tubes)
+    for (const c of this.circuits) {
+      const h = this.cooler[c.id];
+      const F = Fp / 2;
+      const Mw = 105;                                             // kg water per half
+      const dT = (F * CPW * (Tevap_in - h.Tw) - c.Qevap + 0.15 * (this.roomT - h.Tw)) / (Mw * CPW);
+      h.Tw += dT * dt;
+    }
+    // building coils & mains
+    const Ms = 2600, Mr = 3800;           // kg in supply / return mains
+    const Fs_ = Math.max(Fs, 0.05);
+    const coilCap = this.ahuOn ? this.valve * 52 * this.ahuSpd * Math.max(this.Tzone - this.Tsup, 0) : 0;
+    const waterCap = Fs_ * CPW * Math.max(this.Tzone - 0.8 - this.Tsup, 0);
+    this.Qcoil = Math.min(coilCap, waterCap);
+    const TretBldg = this.Tsup + this.Qcoil / (Fs_ * CPW);
+    this.Tsup += (Fs * (TsupIn - this.Tsup) + 0.35 * (this.roomT - this.Tsup)) / (Ms * CPW) * CPW * dt;
+    this.Tret += (Fs * (TretBldg - this.Tret) + (Fp > Fs ? 0 : 0) + 0.45 * (this.Tzone - this.Tret)) / (Mr * CPW) * CPW * dt;
+    // the decoupler leg also exchanges heat with return when primary > secondary
+    if (Fp > Fs) this.Tret += (Fp - Fs) * (lwt - this.Tret) / Mr * dt * 0.0; // (mixing handled at evap inlet)
+    // building zone
+    const occ = this.bas.occ;
+    const h = (this.clock / 3600) % 24;
+    const solar = Math.max(0, Math.sin((h - 6.5) / 13 * Math.PI)) * 140;
+    const Qint = (occ ? 300 : 55) + solar;
+    const Qenv = 13 * (this.oat - this.Tzone);
+    const Cb = 260000;                    // kJ/K effective building mass
+    this.Tzone += (Qint + Qenv - this.Qcoil) / Cb * dt;
+    // AHU valve control (PI on zone temperature)
+    const zsp = F2C(72.5);
+    if (this.ahuOn) {
+      const err = this.Tzone - zsp;
+      this.valveInt = clamp(this.valveInt + err * 0.0009 * dt, 0, 1);
+      this.valve = clamp(0.35 * err + this.valveInt, 0, 1);
+    } else { this.valve = lag(this.valve, 0, 5, dt); }
+  }
+
+  // ---------------- sensors ----------------
+  updateSensors(dt) {
+    const lwt = (this.cooler.A.Tw + this.cooler.B.Tw) / 2;
+    this.lwtSensor = lag(this.lwtSensor, lwt, 7, dt);
+    this.ewtSensor = lag(this.ewtSensor, this.Tevap_in ?? this.Tret, 7, dt);
+  }
+
+  // =====================================================================
+  //  BAS — chilled water plant sequence (field programmed, not Carrier)
+  // =====================================================================
+  updateBAS(dt) {
+    const b = this.bas, P1 = this.P1, P2 = this.P2;
+    if (!this.mainBreaker) {
+      this.basPowered = false; b.seq = 'OFF'; b.t = 0; P1.cmd = false; P2.run = false; this.ctl.remote = false;
+      if (P1.contactor) { P1.contactor = false; this.ev('contactor', 'P1', 0.5); }
+      this.ahuOn = false; this.ahuSpd = lag(this.ahuSpd, 0, 6, dt); P2.hzCmd = 0;
+      return;
+    }
+    if (!this.basPowered) { this.basPowered = true; this.basBoot = 25; }
+    if (this.basBoot > 0) { this.basBoot -= dt; P1.cmd = false; P2.run = false; this.ctl.remote = false; this.ahuOn = false; this.ahuSpd = lag(this.ahuSpd, 0, 6, dt); return; }
+    const h = (this.clock / 3600) % 24;
+    const sched = h >= 7 && h < 16.5;
+    b.occ = b.mode === 'OCC' ? true : b.mode === 'UNOCC' ? false : sched;
+    b.t += dt;
+    const go = (s) => { b.seq = s; b.t = 0; };
+    switch (b.seq) {
+      case 'OFF':
+        P1.cmd = false; P2.run = false; this.ctl.remote = false;
+        if (b.occ) { go('START_P1'); this.ev('relay', 'bas', 0.4); }
+        break;
+      case 'START_P1':
+        P1.cmd = true;
+        if (b.t > 20 && this.flowSwitch) { go('START_P2'); this.ev('relay', 'bas', 0.4); }
+        if (!b.occ) go('STOP_WAIT');
+        break;
+      case 'START_P2':
+        P2.run = true; this.ctl.remote = true;
+        b.speedCmd = 0.86;
+        if (b.t > 25) go('RUN');
+        if (!b.occ) go('STOP_WAIT');
+        break;
+      case 'RUN': {
+        P1.cmd = true; P2.run = true; this.ctl.remote = true;
+        // DP reset loop: tiny, slow trim — VFD sounds essentially constant
+        const err = (b.dpSP - b.dp);
+        b.speedCmd = clamp(b.speedCmd + err * 0.00025 * dt, 0.55, 1.0);
+        if (!b.occ) { go('STOP_WAIT'); this.ev('relay', 'bas', 0.5); }
+        break;
+      }
+      case 'STOP_WAIT':
+        // drop chiller enable, secondary to minimum speed, wait for compressors to finish
+        this.ctl.remote = false; b.speedCmd = 0.2;
+        if (!this.A.compOn && !this.B.compOn && this.ctl.mode !== 'PUMPDOWN') { go('OFF_DELAY'); }
+        if (b.occ) go('RUN');
+        break;
+      case 'OFF_DELAY':
+        b.speedCmd = 0.2;
+        if (b.t > b.offDelay) { go('OFF'); P1.cmd = false; P2.run = false; this.ev('relay', 'bas', 0.4); }
+        if (b.occ) go('RUN');
+        break;
+    }
+    // hand/off/auto at starters
+    const p1Run = P1.hoa === 'HAND' || (P1.hoa === 'AUTO' && P1.cmd);
+    if (p1Run !== P1.contactor) { P1.contactor = p1Run; this.ev(p1Run ? 'thud' : 'contactor', 'P1', p1Run ? 1 : 0.6); }
+    const p2Run = P2.hoa === 'HAND' || (P2.hoa === 'AUTO' && P2.run);
+    P2.run = p2Run;
+    P2.hzCmd = P2.hoa === 'HAND' ? 45 : b.speedCmd * 60;
+    this.ahuOn = b.occ && this.flowSwitch;
+    this.ahuSpd = lag(this.ahuSpd, this.ahuOn ? 1 : 0, 12, dt);
+  }
+
+  // =====================================================================
+  //  ComfortLink-pattern unit controller
+  // =====================================================================
+  alarm(code, text, circ = null) {
+    const c = this.ctl;
+    if (c.alarms.find(a => a.code === code)) return;
+    const a = { code, text, t: this.clock };
+    c.alarms.push(a); c.history.unshift(a); c.history.length = Math.min(c.history.length, 20);
+    this.ev('alarm', 'chiller', 1);
+  }
+  resetAlarms() { this.ctl.alarms = []; for (const c of this.circuits) c.alarm = null; this.ev('relay', 'chiller', 0.3); }
+
+  unitEnabled() {
+    const c = this.ctl;
+    if (!c.estop) return false;
+    if (c.switch === 'ENABLE') return true;
+    if (c.switch === 'REMOTE') return c.remote;
+    return false;
+  }
+
+  // stage table: [capA, capB] relative to lead/lag
+  stageCaps(stage) {
+    const T = [[0, 0], [0.4, 0], [0.7, 0], [1, 0], [1, 0.4], [1, 0.7], [1, 1]];
+    return T[clamp(stage, 0, 6)];
+  }
+  leadLag() { return this.ctl.lead === 'A' ? [this.A, this.B] : [this.B, this.A]; }
+
+  // start a compressor (prelube → wye → delta)
+  requestStart(c) {
+    if (c.state !== 'OFF') return;
+    c.state = 'PRELUBE'; c.tState = 0;
+    c.L1 = c.L2 = false;                                   // loaders off before start
+    c.oilPump = true; this.ev('relay', 'oilpump' + c.id, 0.3);
+  }
+  stopCompressor(c, reason, abrupt = false) {
+    if (c.c1M || c.cS || c.c2M) this.ev('contactor', 'comp' + c.id, 1.0);
+    c.c1M = c.cS = c.c2M = false; c.motor.conn = 'off';
+    c.llsv = false; c.exvTarget = 0; c.oilSol = false; c.oilPump = false; c.mcSol = false;
+    if (abrupt) { c.exv = 0; }
+    if (c.L1 || c.L2) this.ev('solenoid', 'loader' + c.id, 0.4);
+    c.L1 = c.L2 = false;
+    c.running = false; c.state = 'OFF'; c.tState = 0; c.stopT = this.t;
+    for (let i = 0; i < 7; i++) c.fanCmd[i] = false;
+    c.lastStop = reason;
+    this.ev('solenoid', 'llsv' + c.id, 0.8);
+  }
+
+  updateCompressorSequencer(c, dt) {
+    c.tState += dt;
+    const set = (L1, L2) => {
+      if (L1 !== c.L1) this.ev('solenoid', 'loader' + c.id, 0.55);
+      if (L2 !== c.L2) this.ev('solenoid', 'loader' + c.id, 0.55);
+      c.L1 = L1; c.L2 = L2;
+    };
+    switch (c.state) {
+      case 'PRELUBE':
+        // Oil pump 20 s → oil solenoid → 15 s → start (per 30HX start-up sequence)
+        if (!c.oilSol && c.tState >= 20) { c.oilSol = true; this.ev('solenoid', 'oil' + c.id, 0.5); }
+        if (c.tState >= 35) {
+          if (c.oilDP < 90) { this.stopCompressor(c, 'LOW OIL PRESSURE'); this.alarm('T' + (c.id === 'A' ? '051' : '055'), `CIRCUIT ${c.id} COMP 1 LOW OIL PRESSURE`); return; }
+          // close 1M + S → motor in WYE
+          c.c1M = true; c.cS = true; c.motor.conn = 'wye';
+          c.wyeTime = 1.0 + Math.random() * 0.5;               // field-observed 1–1.5 s wye dwell
+          c.llsv = true; c.exvTarget = 0.26; c.exvHoldUntil = this.t + 75;
+          c.state = 'STARTING'; c.tState = 0; c.running = true; c.startT = this.t; c.starts++;
+          c.fanCmd[0] = c.fanCmd[1] = true;
+          this.ev('contactor', 'comp' + c.id, 1.0); this.ev('solenoid', 'llsv' + c.id, 0.8);
+        }
+        break;
+      case 'STARTING':
+        // wye run → open transition → delta  (field-observed transition ≈ 1.2–1.5 s)
+        if (c.cS && c.tState >= c.wyeTime) { c.cS = false; c.motor.conn = 'gap'; this.ev('contactor', 'compS' + c.id, 0.7); }
+        if (!c.cS && !c.c2M && c.tState >= c.wyeTime + 0.05) {
+          c.c2M = true; c.motor.conn = 'delta'; c.motor.transient = 0.8; this.ev('contactor', 'comp' + c.id, 0.9);
+        }
+        if (c.c2M && c.tState > c.wyeTime + 1.5) { c.state = 'RUN'; c.tRun = 0; }
+        break;
+      case 'RUN':
+        c.tRun += dt;
+        if (c.tRun > 120 && c.oilPump) { c.oilPump = false; this.ev('relay', 'oilpump' + c.id, 0.25); }
+        break;
+      case 'PUMPDOWN':
+        c.pdT += dt;
+        if (c.Tsuc < F2C(10) || (c.Tsuc <= c.pdStartSST - 5.56 && c.L < 0.05)) { this.stopCompressor(c, 'PUMPDOWN COMPLETE'); }
+        else if (c.pdT > 360) { this.alarm(c.id === 'A' ? 'T136' : 'T137', `CIRCUIT ${c.id} FAILURE TO PUMP OUT`); this.stopCompressor(c, 'PUMPOUT TIMEOUT'); }
+        break;
+    }
+    // ---- EXV control: discharge superheat PI (DSH set point 22 °F) ----
+    if (c.running && c.state !== 'PUMPDOWN') {
+      if (this.t > c.exvHoldUntil) {
+        if (!c.exvPid) { c.exvPid = true; c.exvInt = c.exvTarget; }
+        const sp = 22 / 1.8;                         // DSH set point 22 °F (Carrier default)
+        const err = c.DSHmeas - sp;                  // positive: too much superheat → open
+        c.exvInt = clamp(c.exvInt + err * 0.00012 * dt, 0.06, 1.0);
+        let tgt = clamp(c.exvInt + err * 0.016, 0.06, 1.0);
+        // MOP: limit feed when suction is very warm
+        if (c.Tsuc > F2C(55)) tgt = Math.min(tgt, c.exv);
+        c.exvTarget = tgt;
+      } else c.exvPid = false;
+    } else if (c.state === 'PUMPDOWN') { c.exvTarget = 0; }
+    // ---- motor cooling solenoid (200 °F set point) ----
+    if (c.running && this.t - c.mcLastSwitch > 4) {
+      if (!c.mcSol && c.Tmotor > F2C(200)) { c.mcSol = true; c.mcLastSwitch = this.t; this.ev('solenoid', 'mc' + c.id, 0.3); }
+      else if (c.mcSol && c.Tmotor < F2C(193)) { c.mcSol = false; c.mcLastSwitch = this.t; this.ev('solenoid', 'mc' + c.id, 0.3); }
+    }
+    // ---- condenser fan staging (09D-pattern switches, 7 fans this circuit) ----
+    if (c.running) {
+      const psig = kPa2psig(c.Pcond), oatF = this.oatF;
+      if (psig > 185) c.fcps1 = true; else if (psig < 97) c.fcps1 = false;
+      if (psig > 205) c.fcps2 = true; else if (psig < 150) c.fcps2 = false;
+      if (oatF > 80) c.ats = true; else if (oatF < 70) c.ats = false;
+      c.fanCmd[0] = c.fanCmd[1] = true;
+      c.fanCmd[2] = c.fanCmd[3] = c.fcps1;
+      c.fanCmd[4] = c.fanCmd[5] = c.ats;
+      c.fanCmd[6] = c.fcps2;
+    }
+    // ---- safeties ----
+    if (c.running) {
+      const sctF = C2F(c.Tcond);
+      if (kPa2psig(c.Pcond) > 300) { this.alarm(c.id === 'A' ? 'T051' : 'T055', `CIRCUIT ${c.id} COMP 1 FAILURE-HIGH PRESSURE SWITCH TRIP`); this.stopCompressor(c, 'HPS', true); return; }
+      if (C2F(c.Tsuc) < 28 && c.state === 'RUN') { c.lowSSTt += dt; } else c.lowSSTt = Math.max(0, c.lowSSTt - dt);
+      if (c.lowSSTt > 180) { this.alarm(c.id === 'A' ? 'A140' : 'A141', `CIRCUIT ${c.id} LOW SATURATED SUCTION TEMPERATURE`); this.stopCompressor(c, 'LOW SST', true); return; }
+      if (c.state === 'RUN' && c.tRun > 30 && kPa2psig(c.Psuc) < 5) { this.alarm(c.id === 'A' ? 'A150' : 'A151', `CIRCUIT ${c.id} LOSS OF CHARGE`); this.stopCompressor(c, 'LOSS OF CHARGE', true); return; }
+      if (c.Tmotor > F2C(245)) { this.alarm(c.id === 'A' ? 'T051' : 'T055', `CIRCUIT ${c.id} COMP 1 HIGH MOTOR TEMPERATURE`); this.stopCompressor(c, 'MOTOR TEMP', true); return; }
+      if (sctF > 150) { c.highSCTt = (c.highSCTt || 0) + dt; } else c.highSCTt = 0;
+    }
+  }
+
+  updateController(dt) {
+    const c = this.ctl;
+    const chPow = this.mainBreaker && this.chillerDisc;
+    if (!chPow) {
+      if (this.ctlPowered) {
+        for (const k of this.circuits) if (k.state !== 'OFF' || k.c1M) this.stopCompressor(k, 'POWER LOSS', true);
+        c.mode = 'OFF'; c.stage = 0; c.smz = 0; this.ctlPowered = false;
+      }
+      for (const k of this.circuits) { k.oilHeater = false; for (let i = 0; i < 7; i++) k.fanCmd[i] = false; }
+      return;
+    }
+    if (!this.ctlPowered) { this.ctlPowered = true; this.ctlBoot = 75; this.ev('relay', 'chiller', 0.3); }
+    if (this.ctlBoot > 0) { this.ctlBoot -= dt; c.mode = 'OFF'; return; }
+    const en = this.unitEnabled() && c.alarms.filter(a => a.code.startsWith('A2')).length === 0;
+    const [lead, lag_] = this.leadLag();
+
+    // emergency switch: everything drops out instantly (slide valves stay where they were)
+    if (!c.estop) {
+      for (const k of this.circuits) if (k.state !== 'OFF') this.stopCompressor(k, 'EMERGENCY STOP', true);
+      c.stage = 0; c.mode = 'OFF'; c.smz = 0;
+    }
+    for (const k of this.circuits) this.updateCompressorSequencer(k, dt);
+
+    // flow switch / pump interlock
+    const anyOn = this.circuits.some(k => k.state !== 'OFF');
+    if (anyOn && !this.flowSwitch) {
+      c.noFlowT = (c.noFlowT || 0) + dt;
+      if (c.noFlowT > 10) {
+        this.alarm('A201', 'COOLER PUMP INTERLOCK OPENED DURING NORMAL OPERATION');
+        for (const k of this.circuits) this.stopCompressor(k, 'FLOW LOSS', true);
+        c.stage = 0;
+      }
+    } else c.noFlowT = 0;
+    if (en && !this.flowSwitch && c.mode === 'ON') { c.waitFlow = (c.waitFlow || 0) + dt; if (c.waitFlow > 300) this.alarm('A200', 'COOLER PUMP INTERLOCK FAILURE TO CLOSE AT START-UP'); } else c.waitFlow = 0;
+    // low fluid temperature (freeze protection)
+    if (C2F(this.lwtSensor) < 34 && anyOn) { this.alarm('A206', 'COOLER FREEZE PROTECTION'); for (const k of this.circuits) this.stopCompressor(k, 'FREEZE', true); c.stage = 0; }
+
+    // ---- mode transitions ----
+    if (en && c.mode === 'OFF') { c.mode = 'ON'; c.smz = 0; c.lastStep = this.t - 60; }
+    if (!en && (c.mode === 'ON')) {
+      // transition to off: unload, stop lag, pump down lead
+      c.mode = 'PUMPDOWN';
+      for (const k of this.circuits) {
+        if (k.state === 'PRELUBE') { k.state = 'OFF'; k.oilPump = false; k.oilSol = false; }
+      }
+      const runningK = this.circuits.filter(k => k.state === 'RUN' || k.state === 'STARTING');
+      // lag circuit off now, lead circuit pumps down
+      if (runningK.length > 1) this.stopCompressor(runningK.includes(lag_) ? lag_ : runningK[1], 'UNIT OFF');
+      for (const k of this.circuits) if (k.state === 'RUN' || k.state === 'STARTING') { k.state = 'PUMPDOWN'; k.pdT = 0; k.pdStartSST = k.Tsuc; k.llsv = false; this.ev('solenoid', 'llsv' + k.id, 0.9); }
+      c.stage = 0;
+    }
+    if (c.mode === 'PUMPDOWN' && !this.circuits.some(k => k.state !== 'OFF')) {
+      c.mode = 'OFF';
+      // automatic lead/lag: circuit with fewer hours leads next time
+      c.lead = this.A.hours <= this.B.hours ? 'A' : 'B';
+    }
+    if (en && c.mode === 'PUMPDOWN') { /* finish pumpdown first, then restart */ }
+
+    // hours
+    for (const k of this.circuits) if (k.running) k.hours += dt / 3600;
+
+    // ---- capacity algorithm (every 30 s) ----
+    c.ctpt = c.setpoint;
+    c.tick -= dt;
+    if (c.tick <= 0) {
+      c.tick += 30;
+      const lwtF = C2F(this.lwtSensor), ctF = C2F(c.ctpt);
+      const rateF = (lwtF - C2F(c.lastLwt)) / 0.5;              // °F per minute
+      c.rate = rateF; c.lastLwt = this.lwtSensor;
+      if (c.mode === 'ON') this.capacityTick(lwtF, ctF, rateF);
+    }
+    // high condensing temperature unloading (every 10 s)
+    c.hsct = (c.hsct || 0) - dt;
+    if (c.hsct <= 0) {
+      c.hsct = 10;
+      for (const k of this.circuits) {
+        if (k.state !== 'RUN') continue;
+        const sct = C2F(k.Tcond);
+        if (sct > 145 + 2) {
+          k.hsT = (k.hsT || 0) + 10;
+          if (k.hsT >= 60 || sct > 150) {
+            k.hsT = 0;
+            if (k.L2) { k.L2 = false; this.ev('solenoid', 'loader' + k.id, 0.55); c.stage = Math.max(c.stage - 1, 0); }
+            else if (k.L1) { k.L1 = false; this.ev('solenoid', 'loader' + k.id, 0.55); c.stage = Math.max(c.stage - 1, 0); }
+            else { this.alarm(k.id === 'A' ? 'A060' : 'A061', `CIRCUIT ${k.id} HIGH SATURATED CONDENSING TEMPERATURE`); this.stopCompressor(k, 'HIGH SCT', true); }
+          }
+        } else k.hsT = 0;
+      }
+    }
+    // reconcile actual circuit states with stage
+    this.applyStage(dt);
+    // ---- capacity display ----
+    const totCap = (this.A.running ? this.A.sv : 0) + (this.B.running ? this.B.sv : 0);
+    c.capacityPct = Math.round(totCap / 2 * 100);
+  }
+
+  capacityTick(lwtF, ctF, rateF) {
+    const c = this.ctl;
+    const err = lwtF - ctF;
+    const [lead, lag_] = this.leadLag();
+    // slow-change override: near set point and moving toward it → hold
+    const toward = (err > 0 && rateF < -0.05) || (err < 0 && rateF > 0.05);
+    let z = 0;
+    if (!(Math.abs(err) < 1.0 && toward)) z = 9 * err + 22 * rateF;
+    if (c.stage === 0 && z < 0) z = 0;
+    const hi = c.stage === 0 ? 130 : c.stage >= 6 ? 60 : 110;
+    const lo = c.stage === 0 ? 0 : -110;
+    c.smz = clamp(c.smz + z / c.zgain, lo, hi);
+    if (this.t - c.lastStep < 90) return;                  // 90 s between capacity changes
+    if (this.circuits.some(k => k.state === 'PRELUBE' || k.state === 'STARTING' || k.state === 'PUMPDOWN')) return;
+    const next = this.nextStageUp(c.stage);
+    const nextIsComp = next === 1 || next === 4;
+    const upThresh = (nextIsComp ? 100 : 60) * (c.stage === 0 ? 1.2 : 1);
+    // ramp loading limit (CRMP): pulling down faster than allowed → no increase
+    const rampBlock = err > 4 && rateF < -c.rampLimit;
+    // low discharge superheat override (ignored 3 min after start)
+    const lowDSH = this.circuits.some(k => k.state === 'RUN' && k.tRun > 180 && C2F(k.Tcond + k.DSHmeas) - C2F(k.Tcond) < 15);
+    // low saturated suction override
+    const lowSST = this.circuits.some(k => k.state === 'RUN' && C2F(k.Tsuc) < 34);
+    // loaders not allowed until loader delay after compressor start
+    const loaderHold = this.circuits.some(k => k.state === 'RUN' && k.tRun < c.loaderDelay);
+    if (c.smz >= upThresh && c.stage < 6 && !rampBlock && !lowDSH && !lowSST && !(loaderHold && !nextIsComp)) {
+      // minimum off time for a compressor that is about to start
+      if (nextIsComp) {
+        const k = next === 1 ? lead : lag_;
+        if (this.t - k.stopT < 120 || k.alarm) return;
+      }
+      c.stage = next; c.smz = 0; c.lastStep = this.t; c.lastStageChangeReason = 'LOAD';
+      return;
+    }
+    // unloading
+    const prev = this.nextStageDown(c.stage);
+    const prevIsCompStop = c.stage === 1 || c.stage === 4;
+    const dnThresh = (prevIsCompStop ? 100 : 60) * (c.stage === 1 ? 1.2 : 1);
+    // low entering fluid unloading: remove ≥ 25 % of stages at once
+    if (C2F(this.ewtSensor) < ctF && c.stage > 1) {
+      const target = Math.max(1, Math.floor(c.stage * 0.75 - 0.01));
+      c.stage = target; c.smz = 0; c.lastStep = this.t; c.lastStageChangeReason = 'LOW EWT';
+      return;
+    }
+    if (c.smz <= -dnThresh && c.stage > 0) {
+      c.stage = prev; c.smz = 0; c.lastStep = this.t; c.lastStageChangeReason = 'UNLOAD';
+    }
+  }
+  nextStageUp(s) { return { 0: 1, 1: 3, 2: 3, 3: 4, 4: 6, 5: 6, 6: 6 }[s]; }
+  nextStageDown(s) { return Math.max(0, s - 1); }
+
+  applyStage(dt) {
+    const c = this.ctl;
+    if (c.mode !== 'ON') return;
+    const [lead, lag_] = this.leadLag();
+    const [capL, capG] = this.stageCaps(c.stage);
+    const drive = (k, cap) => {
+      if (cap === 0) {
+        if (k.state === 'RUN' || k.state === 'STARTING') this.stopCompressor(k, 'CAPACITY');
+        if (k.state === 'PRELUBE') { k.state = 'OFF'; k.oilPump = false; k.oilSol = false; }
+        return;
+      }
+      if (k.state === 'OFF') { if (!k.alarm) this.requestStart(k); return; }
+      if (k.state !== 'RUN') return;
+      if (k.tRun < c.loaderDelay) return;
+      const L1 = cap >= 0.7, L2 = cap >= 1.0;
+      if (L1 !== k.L1 || L2 !== k.L2) {
+        // L2 is wired so that both loaders energise together on initial staging
+        if (L1 !== k.L1) this.ev('solenoid', 'loader' + k.id, 0.6);
+        if (L2 !== k.L2) this.ev('solenoid', 'loader' + k.id, 0.6);
+        k.L1 = L1; k.L2 = L2;
+      }
+    };
+    drive(lead, capL); drive(lag_, capG);
+    // if a circuit tripped, roll the stage back so we don't keep asking it
+    if (capG > 0 && lag_.alarm) c.stage = Math.min(c.stage, 3);
+  }
+
+  // =====================================================================
+  step(dt) {
+    this.t += dt; this.clock += dt;
+    this.updateWeather();
+    this.updateBAS(dt);
+    this.updateController(dt);
+    const FpHalf = this.Fp / 2;
+    for (const c of this.circuits) c.step(dt, { FpHalf, Tin: this.Tevap_in ?? this.Tret });
+    this.updateWater(dt);
+    this.updateSensors(dt);
+    this.updateElectrical(dt);
+    // mechanical room temperature drifts with equipment heat
+    const heat = this.circuits.reduce((s, c) => s + c.motor.Pelec * 0.05, 0) + this.P1.motor.Pelec * 0.1 + this.vfd.kW * 0.05;
+    this.roomT += ((F2C(80) + (this.oat - F2C(80)) * 0.25 + heat * 0.02) - this.roomT) / 1800 * dt;
+  }
+}
+// per-compressor randomised wye dwell, matching field observation (1.0–1.5 s)
+Circuit.prototype.wyeTime = 1.25;
+
+const SimLib = { Plant, Circuit, InductionMotor, R134a, C2F, F2C, kPa2psig, psig2kPa, GPM, clamp, lerp, lag, approach };
+
+
+// =====================================================================
+//  SCENE — mechanical room, chiller, pumps, piping, electrical, AHU
+// =====================================================================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1c1e);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.82;
+renderer.shadowMap.enabled = false;
+document.getElementById('app').appendChild(renderer.domElement);
+renderer.domElement.id = 'gl';
+
+const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.05, 80);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.3;
+
+const clickables = [];          // meshes with userData.onClick
+const colliders = [];           // {x0,x1,z0,z1}
+const anim = {};                // references for animation
+const ROOM = { x0: -12, x1: 12, z0: -8, z1: 8, h: 6.2 };
+
+// ---------- texture helpers ----------
+function canvasTex(w, h, draw, { repeat = null, srgb = true } = {}) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); draw(g, w, h);
+  const t = new THREE.CanvasTexture(c);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
+}
+function noiseFill(g, w, h, base, amp, n = 9000, size = 2) {
+  g.fillStyle = base; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < n; i++) {
+    const v = (Math.random() - 0.5) * amp;
+    g.fillStyle = v > 0 ? `rgba(255,255,255,${v})` : `rgba(0,0,0,${-v})`;
+    g.fillRect(Math.random() * w, Math.random() * h, size * Math.random() + 0.5, size * Math.random() + 0.5);
+  }
+}
+const texConcrete = canvasTex(512, 512, (g, w, h) => {
+  noiseFill(g, w, h, '#8f8d86', 0.12, 26000, 2.5);
+  for (let i = 0; i < 40; i++) { g.fillStyle = `rgba(60,55,50,${Math.random() * 0.05})`; g.beginPath(); g.arc(Math.random() * w, Math.random() * h, 20 + Math.random() * 70, 0, 7); g.fill(); }
+}, { repeat: [10, 7] });
+const texCMU = canvasTex(512, 512, (g, w, h) => {
+  noiseFill(g, w, h, '#d9d4c5', 0.07, 14000, 2);
+  g.strokeStyle = 'rgba(120,112,98,0.55)'; g.lineWidth = 3;
+  const bh = h / 8, bw = w / 2;
+  for (let r = 0; r < 8; r++) {
+    g.beginPath(); g.moveTo(0, r * bh); g.lineTo(w, r * bh); g.stroke();
+    const off = (r % 2) * bw / 2;
+    for (let c = -1; c < 3; c++) { g.beginPath(); g.moveTo(c * bw + off, r * bh); g.lineTo(c * bw + off, (r + 1) * bh); g.stroke(); }
+  }
+}, { repeat: [6, 4] });
+const texDeck = canvasTex(256, 256, (g, w, h) => {
+  g.fillStyle = '#6a6f72'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 8; i++) { const x = i * w / 8; const gr = g.createLinearGradient(x, 0, x + w / 8, 0); gr.addColorStop(0, '#565b5e'); gr.addColorStop(0.5, '#7b8083'); gr.addColorStop(1, '#565b5e'); g.fillStyle = gr; g.fillRect(x, 0, w / 8, h); }
+}, { repeat: [12, 1] });
+const texInsul = canvasTex(256, 256, (g, w, h) => { noiseFill(g, w, h, '#151515', 0.06, 9000, 1.5); }, { repeat: [3, 1] });
+
+// ---------- materials ----------
+const M = {
+  floor: new THREE.MeshStandardMaterial({ map: texConcrete, roughness: 0.82, metalness: 0.0 }),
+  wall: new THREE.MeshStandardMaterial({ map: texCMU, roughness: 0.92 }),
+  deck: new THREE.MeshStandardMaterial({ map: texDeck, roughness: 0.6, metalness: 0.5 }),
+  pad: new THREE.MeshStandardMaterial({ color: 0xa8a59c, roughness: 0.9 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0x5f6468, roughness: 0.55, metalness: 0.6 }),
+  darkSteel: new THREE.MeshStandardMaterial({ color: 0x33373a, roughness: 0.6, metalness: 0.5 }),
+  joist: new THREE.MeshStandardMaterial({ color: 0x8c9196, roughness: 0.6, metalness: 0.4 }),
+  unit: new THREE.MeshStandardMaterial({ color: 0xb5b8b2, roughness: 0.45, metalness: 0.25 }),
+  unitDark: new THREE.MeshStandardMaterial({ color: 0x8e918c, roughness: 0.5, metalness: 0.3 }),
+  comp: new THREE.MeshStandardMaterial({ color: 0x7c8287, roughness: 0.55, metalness: 0.45 }),
+  insul: new THREE.MeshStandardMaterial({ map: texInsul, color: 0x1d1d1d, roughness: 0.95 }),
+  copper: new THREE.MeshStandardMaterial({ color: 0xc27a4a, roughness: 0.32, metalness: 1.0 }),
+  copperDull: new THREE.MeshStandardMaterial({ color: 0x9a6040, roughness: 0.5, metalness: 0.9 }),
+  brass: new THREE.MeshStandardMaterial({ color: 0xb59a52, roughness: 0.35, metalness: 1.0 }),
+  jacket: new THREE.MeshStandardMaterial({ color: 0xe8e8e2, roughness: 0.55 }),
+  pump: new THREE.MeshStandardMaterial({ color: 0x2f6e85, roughness: 0.45, metalness: 0.35 }),
+  motor: new THREE.MeshStandardMaterial({ color: 0x3e4b58, roughness: 0.5, metalness: 0.4 }),
+  yellow: new THREE.MeshStandardMaterial({ color: 0xe2b21c, roughness: 0.55 }),
+  red: new THREE.MeshStandardMaterial({ color: 0xb3261e, roughness: 0.45 }),
+  orange: new THREE.MeshStandardMaterial({ color: 0xd96c1a, roughness: 0.5 }),
+  black: new THREE.MeshStandardMaterial({ color: 0x111214, roughness: 0.6 }),
+  rubber: new THREE.MeshStandardMaterial({ color: 0x0b0b0b, roughness: 0.9 }),
+  elec: new THREE.MeshStandardMaterial({ color: 0x9aa0a4, roughness: 0.5, metalness: 0.3 }),
+  elecDark: new THREE.MeshStandardMaterial({ color: 0x6d7378, roughness: 0.5, metalness: 0.3 }),
+  conduit: new THREE.MeshStandardMaterial({ color: 0xb4b8bb, roughness: 0.35, metalness: 0.8 }),
+  galv: new THREE.MeshStandardMaterial({ color: 0xaeb3b5, roughness: 0.4, metalness: 0.75 }),
+  ahu: new THREE.MeshStandardMaterial({ color: 0xcdc8b8, roughness: 0.55, metalness: 0.2 }),
+  glass: new THREE.MeshStandardMaterial({ color: 0xbfd8e0, roughness: 0.05, metalness: 0.0, transparent: true, opacity: 0.25 }),
+  white: new THREE.MeshStandardMaterial({ color: 0xf2f2ee, roughness: 0.6 }),
+  lamp: new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xf4f6ff, emissiveIntensity: 2.2, roughness: 0.3 }),
+  fixture: new THREE.MeshStandardMaterial({ color: 0xe9e9e6, roughness: 0.4, metalness: 0.3 }),
+  wood: new THREE.MeshStandardMaterial({ color: 0x9a7a52, roughness: 0.8 }),
+  green: new THREE.MeshStandardMaterial({ color: 0x2d7a3f, roughness: 0.5 }),
+  safety: new THREE.MeshStandardMaterial({ color: 0xe6c020, roughness: 0.7 }),
+};
+
+// ---------- geometry helpers ----------
+const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+function add(mesh, parent = scene) { parent.add(mesh); return mesh; }
+function box(w, h, d, mat, x, y, z, parent = scene) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); return add(m, parent);
+}
+function cyl(r, len, mat, x, y, z, axis = 'y', parent = scene, seg = 24, rTop = null) {
+  const g = new THREE.CylinderGeometry(rTop ?? r, r, len, seg);
+  if (axis === 'x') g.rotateZ(Math.PI / 2); else if (axis === 'z') g.rotateX(Math.PI / 2);
+  const m = new THREE.Mesh(g, mat); m.position.set(x, y, z); return add(m, parent);
+}
+function sphere(r, mat, x, y, z, parent = scene, seg = 16) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, Math.max(8, seg / 2)), mat); m.position.set(x, y, z); return add(m, parent);
+}
+const _up = V3(0, 1, 0);
+function rod(a, b, r, mat, parent = scene, seg = 16) {
+  const d = new THREE.Vector3().subVectors(b, a); const len = d.length();
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, seg), mat);
+  m.position.copy(a).addScaledVector(d, 0.5);
+  m.quaternion.setFromUnitVectors(_up, d.normalize());
+  return add(m, parent);
+}
+function pipe(points, r, mat, { parent = scene, joints = true, seg = 18, jointMat = null, flanges = [] } = {}) {
+  const g = new THREE.Group(); parent.add(g);
+  for (let i = 0; i < points.length - 1; i++) rod(points[i], points[i + 1], r, mat, g, seg);
+  if (joints) for (let i = 1; i < points.length - 1; i++) sphere(r * 1.0, jointMat || mat, points[i].x, points[i].y, points[i].z, g, seg);
+  for (const f of flanges) flangeAt(f.p, f.dir, r, g, f.mat);
+  return g;
+}
+function flangeAt(p, dir, r, parent = scene, mat = M.steel) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.45, r * 1.45, r * 0.35, 20), mat);
+  m.position.copy(p); m.quaternion.setFromUnitVectors(_up, dir.clone().normalize()); parent.add(m); return m;
+}
+function collider(x0, x1, z0, z1) { colliders.push({ x0: Math.min(x0, x1), x1: Math.max(x0, x1), z0: Math.min(z0, z1), z1: Math.max(z0, z1) }); }
+function clickable(mesh, onClick, opts = {}) { mesh.userData.onClick = onClick; Object.assign(mesh.userData, opts); clickables.push(mesh); return mesh; }
+
+// ---------- text / label planes ----------
+function textPlane(lines, w, h, { bg = '#f4f1e6', fg = '#111', font = 'bold 44px Arial', px = 512, border = null, align = 'center', basic = false, pad = 18 } = {}) {
+  const ph = Math.round(px * h / w);
+  const tex = canvasTex(px, ph, (g, W, H) => {
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    if (border) { g.strokeStyle = border; g.lineWidth = Math.max(4, W / 80); g.strokeRect(g.lineWidth / 2, g.lineWidth / 2, W - g.lineWidth, H - g.lineWidth); }
+    g.fillStyle = fg; g.textBaseline = 'middle';
+    const arr = Array.isArray(lines) ? lines : [lines];
+    const lh = H / arr.length;
+    arr.forEach((ln, i) => {
+      let f = font, txt = ln;
+      if (typeof ln === 'object') { f = ln.font || font; txt = ln.t; g.fillStyle = ln.c || fg; } else g.fillStyle = fg;
+      g.font = f; g.textAlign = align;
+      g.fillText(txt, align === 'center' ? W / 2 : pad, lh * (i + 0.5), W - pad * 2);
+    });
+  });
+  const mat = basic ? new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }) : new THREE.MeshStandardMaterial({ map: tex, roughness: 0.7 });
+  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+}
+function place(mesh, x, y, z, ry = 0, parent = scene) { mesh.position.set(x, y, z); mesh.rotation.y = ry; parent.add(mesh); return mesh; }
+
+// pipe identification band with arrow
+function pipeLabel(text, color, w = 0.62, h = 0.13) {
+  return textPlane([text], w, h, { bg: color, fg: color === '#f2c200' ? '#111' : '#fff', font: 'bold 40px Arial', px: 512 });
+}
+
+// ---------- dynamic screens ----------
+function makeScreen(w, h, pxW, pxH, parent, x, y, z, ry = 0) {
+  const c = document.createElement('canvas'); c.width = pxW; c.height = pxH;
+  const g = c.getContext('2d');
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+  mesh.position.set(x, y, z); mesh.rotation.y = ry; parent.add(mesh);
+  return { mesh, g, tex, w: pxW, h: pxH, c };
+}
+
+// ---------- dial gauge (physical needle) ----------
+function makeGauge({ r = 0.065, min = 0, max = 100, major = 10, minor = 5, unit = 'PSI', title = '', face = '#f6f5f0', ring = M.steel, red = null, dual = null }) {
+  const grp = new THREE.Group();
+  const tex = canvasTex(256, 256, (g, W, H) => {
+    const cx = W / 2, cy = H / 2, R = W * 0.46;
+    g.fillStyle = face; g.beginPath(); g.arc(cx, cy, R + 8, 0, 7); g.fill();
+    const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
+    const ang = v => a0 + (v - min) / (max - min) * (a1 - a0);
+    if (red) { g.strokeStyle = '#c62020'; g.lineWidth = 10; g.beginPath(); g.arc(cx, cy, R * 0.86, ang(red[0]), ang(red[1])); g.stroke(); }
+    g.strokeStyle = '#111'; g.fillStyle = '#111';
+    for (let v = min; v <= max + 1e-6; v += (max - min) / (major * minor)) {
+      const a = ang(v), isMaj = Math.abs(((v - min) / ((max - min) / major)) - Math.round((v - min) / ((max - min) / major))) < 1e-3;
+      g.lineWidth = isMaj ? 4 : 1.6;
+      const r0 = R * (isMaj ? 0.74 : 0.82), r1 = R * 0.93;
+      g.beginPath(); g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); g.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1); g.stroke();
+      if (isMaj) { g.font = 'bold 22px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(Math.round(v), cx + Math.cos(a) * R * 0.58, cy + Math.sin(a) * R * 0.58); }
+    }
+    if (dual) {  // inner temperature scale (refrigerant gauges)
+      g.fillStyle = '#1f5fb0'; g.font = 'bold 13px Arial';
+      for (const [v, lbl] of dual) { const a = ang(v); g.fillText(lbl, cx + Math.cos(a) * R * 0.36, cy + Math.sin(a) * R * 0.36); }
+    }
+    g.fillStyle = '#222'; g.font = 'bold 20px Arial'; g.textAlign = 'center'; g.fillText(unit, cx, cy + R * 0.42);
+    if (title) { g.font = 'bold 16px Arial'; g.fillText(title, cx, cy - R * 0.32); }
+  });
+  const faceM = new THREE.Mesh(new THREE.CircleGeometry(r, 40), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 }));
+  faceM.position.z = 0.012; grp.add(faceM);
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.08, r * 1.08, 0.03, 32), ring); body.rotation.x = Math.PI / 2; grp.add(body);
+  const glass = new THREE.Mesh(new THREE.CircleGeometry(r * 1.02, 32), M.glass); glass.position.z = 0.0175; grp.add(glass);
+  const pivot = new THREE.Group(); pivot.position.z = 0.015; grp.add(pivot);
+  const needle = new THREE.Mesh(new THREE.BoxGeometry(r * 0.08, r * 0.86, 0.002), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+  needle.position.y = r * 0.36; pivot.add(needle);
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.08, r * 0.08, 0.006, 12), M.black); hub.rotation.x = Math.PI / 2; pivot.add(hub);
+  let cur = min;
+  const set = (v, dt = 0.016) => {
+    cur += (clamp(v, min - (max - min) * 0.03, max + (max - min) * 0.03) - cur) * (1 - Math.exp(-dt / 0.25));
+    const a = Math.PI * 0.75 + (cur - min) / (max - min) * Math.PI * 1.5;
+    pivot.rotation.z = -(a + Math.PI / 2) + Math.PI;  // canvas angle (clockwise from +x) → mesh rotation
+  };
+  set(min, 10);
+  return { group: grp, set, pivot };
+}
+
+// =====================================================================
+//  ROOM SHELL
+// =====================================================================
+{
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(24, 16), M.floor); floor.rotation.x = -Math.PI / 2; scene.add(floor);
+  // walls (with door opening in south wall, x -1..1)
+  const H = ROOM.h;
+  const wallBox = (w, h, d, x, y, z) => box(w, h, d, M.wall, x, y, z);
+  wallBox(24.4, H, 0.2, 0, H / 2, -8.1);            // north
+  wallBox(0.2, H, 16.4, -12.1, H / 2, 0);           // west
+  wallBox(0.2, H, 16.4, 12.1, H / 2, 0);            // east
+  wallBox(11.1, H, 0.2, -6.55, H / 2, 8.1);         // south left
+  wallBox(11.1, H, 0.2, 6.55, H / 2, 8.1);          // south right
+  wallBox(2.0, H - 2.25, 0.2, 0, 2.25 + (H - 2.25) / 2, 8.1); // over door
+  // painted base stripe
+  const stripe = new THREE.MeshStandardMaterial({ color: 0x5a6a73, roughness: 0.8 });
+  box(24, 0.15, 0.02, stripe, 0, 0.075, -7.99); box(0.02, 0.15, 16, stripe, -11.99, 0.075, 0); box(0.02, 0.15, 16, stripe, 11.99, 0.075, 0);
+  box(11, 0.15, 0.02, stripe, -6.5, 0.075, 7.99); box(11, 0.15, 0.02, stripe, 6.5, 0.075, 7.99);
+  // roof deck + joists
+  const deck = new THREE.Mesh(new THREE.PlaneGeometry(24, 16), M.deck); deck.rotation.x = Math.PI / 2; deck.position.y = H; scene.add(deck);
+  for (let x = -11; x <= 11; x += 2) {
+    box(0.06, 0.06, 16, M.joist, x, H - 0.03, 0); box(0.06, 0.06, 16, M.joist, x, H - 0.6, 0);
+    for (let z = -7.6; z < 7.8; z += 0.8) rod(V3(x, H - 0.6, z), V3(x, H - 0.03, z + 0.4), 0.012, M.joist);
+  }
+  box(0.35, 0.5, 16, M.joist, -6, H - 0.85, 0); box(0.35, 0.5, 16, M.joist, 6, H - 0.85, 0); // beams
+  // columns
+  for (const [x, z] of [[-6, -4], [6, -4], [-6, 4], [6, 4]]) { box(0.3, H - 0.6, 0.3, M.joist, x, (H - 0.6) / 2, z); collider(x - 0.3, x + 0.3, z - 0.3, z + 0.3); }
+  // doors
+  const doorMat = new THREE.MeshStandardMaterial({ color: 0x6d7b84, roughness: 0.45, metalness: 0.4 });
+  box(0.88, 2.15, 0.05, doorMat, -0.45, 1.075, 7.98); box(0.88, 2.15, 0.05, doorMat, 0.45, 1.075, 7.98);
+  box(0.7, 0.04, 0.05, M.steel, -0.45, 1.0, 7.92); box(0.7, 0.04, 0.05, M.steel, 0.45, 1.0, 7.92);
+  box(0.05, 0.4, 0.04, M.glass, -0.45, 1.65, 7.95); box(0.05, 0.4, 0.04, M.glass, 0.45, 1.65, 7.95);
+  box(2.0, 0.06, 0.12, M.steel, 0, 2.2, 7.98); box(0.06, 2.2, 0.12, M.steel, -0.95, 1.1, 7.98); box(0.06, 2.2, 0.12, M.steel, 0.95, 1.1, 7.98);
+  const exit = textPlane(['EXIT'], 0.42, 0.16, { bg: '#1a0000', fg: '#ff3b2a', font: 'bold 120px Arial', basic: true });
+  place(exit, 0, 2.45, 7.88, Math.PI);
+  box(0.46, 0.2, 0.06, M.white, 0, 2.45, 7.93);
+  // door sign
+  place(textPlane(['MECHANICAL ROOM', { t: 'AUTHORIZED PERSONNEL ONLY', font: 'bold 30px Arial' }], 0.7, 0.22, { bg: '#ffffff', fg: '#111', border: '#c00' }), -0.45, 1.85, 7.94, Math.PI);
+  // floor safety striping around chiller + yellow keep-clear lines in front of switchboard
+  const stripeY = new THREE.MeshStandardMaterial({ color: 0xe8c21a, roughness: 0.7 });
+  const lineRect = (x0, x1, z0, z1) => { const t = 0.08; box(x1 - x0, 0.004, t, stripeY, (x0 + x1) / 2, 0.002, z0); box(x1 - x0, 0.004, t, stripeY, (x0 + x1) / 2, 0.002, z1); box(t, 0.004, z1 - z0, stripeY, x0, 0.002, (z0 + z1) / 2); box(t, 0.004, z1 - z0, stripeY, x1, 0.002, (z0 + z1) / 2); };
+  lineRect(-5.2, 2.6, -4.6, 0.4);
+  lineRect(9.2, 11.95, -6.8, -2.7);
+  // floor drains
+  for (const [x, z] of [[-2, 0.9], [-8.5, 0], [6.5, 2.5]]) { cyl(0.11, 0.006, M.darkSteel, x, 0.003, z); }
+}
+
+// =====================================================================
+//  LIGHTING — fluorescent strip fixtures on chains (dim with bus voltage)
+// =====================================================================
+const lighting = { fixtures: [], points: [], hemi: null, base: [], lampMat: M.lamp, emer: [] };
+{
+  lighting.hemi = new THREE.HemisphereLight(0xe8eef5, 0x4a4a46, 0.32); scene.add(lighting.hemi);
+  const xs = [-9, -3, 3, 9], zs = [-5.2, -0.2, 4.8];
+  for (const x of xs) for (const z of zs) {
+    const y = 4.55;
+    const f = new THREE.Group(); f.position.set(x, y, z); scene.add(f);
+    box(2.45, 0.08, 0.32, M.fixture, 0, 0.06, 0, f);
+    for (const dz of [-0.1, -0.034, 0.034, 0.1]) cyl(0.014, 2.3, M.lamp, 0, 0.0, dz, 'x', f, 10);
+    rod(V3(x - 1.0, y + 0.1, z), V3(x - 1.0, ROOM.h - 0.6, z), 0.006, M.steel); rod(V3(x + 1.0, y + 0.1, z), V3(x + 1.0, ROOM.h - 0.6, z), 0.006, M.steel);
+  }
+  // point lights (no shadows) roughly under fixture rows
+  const pl = [[-9, -5], [-3, -5], [3, -5], [9, -5], [-9, 0], [-3, 0], [3, 0], [9, 0], [-6, 4.8], [0, 4.8], [6, 4.8]];
+  for (const [x, z] of pl) { const p = new THREE.PointLight(0xf5f7ff, 9, 0, 1.5); p.position.set(x, 4.35, z); scene.add(p); lighting.points.push(p); lighting.base.push(9); }
+  // emergency battery units (come on with power loss)
+  for (const [x, z, ry] of [[-6, 7.9, Math.PI], [6, 7.9, Math.PI], [11.9, 0, -Math.PI / 2]]) {
+    const g = new THREE.Group(); g.position.set(x, 3.0, z); g.rotation.y = ry; scene.add(g);
+    box(0.4, 0.18, 0.1, M.white, 0, 0, -0.05, g);
+    const lampL = sphere(0.045, new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffeecc, emissiveIntensity: 0 }), -0.14, -0.07, -0.1, g); const lampR = sphere(0.045, lampL.material, 0.14, -0.07, -0.1, g);
+    const s = new THREE.SpotLight(0xfff1d6, 0, 22, 0.9, 0.6, 1.4); s.position.set(x, 2.95, z); s.target.position.set(x * 0.6, 0, z * 0.4); scene.add(s); scene.add(s.target);
+    lighting.emer.push({ spot: s, mat: lampL.material });
+  }
+}
+
+// =====================================================================
+//  CHILLER CH-1  (30HXA-pattern condenserless twin-screw, R-134a)
+// =====================================================================
+const CH = { x: -1.2, z: -2.2 };
+const ch = new THREE.Group(); ch.position.set(CH.x, 0, CH.z); scene.add(ch);
+anim.comp = {};
+{
+  box(5.6, 0.1, 2.0, M.pad, 0.1, 0.05, 0, ch);
+  // base rails + saddles
+  box(4.3, 0.16, 0.12, M.steel, 0, 0.18, 0.45, ch); box(4.3, 0.16, 0.12, M.steel, 0, 0.18, -0.45, ch);
+  for (const x of [-1.65, 0, 1.65]) {
+    box(0.16, 0.7, 1.05, M.unitDark, x, 0.6, 0, ch);
+    box(0.24, 0.05, 1.1, M.steel, x, 0.27, 0, ch);
+  }
+  // oil separator (lower vessel)
+  cyl(0.24, 3.45, M.unit, 0, 0.5, 0.2, 'x', ch, 32);
+  sphere(0.24, M.unit, -1.725, 0.5, 0.2, ch, 24).scale.set(0.35, 1, 1);
+  sphere(0.24, M.unit, 1.725, 0.5, 0.2, ch, 24).scale.set(0.35, 1, 1);
+  // cooler — black closed-cell insulation, tape seams
+  cyl(0.42, 3.62, M.insul, 0, 1.18, -0.05, 'x', ch, 40);
+  for (let x = -1.6; x <= 1.61; x += 0.64) cyl(0.423, 0.03, M.black, x, 1.18, -0.05, 'x', ch, 40);
+  // tube sheets & heads
+  for (const s of [-1, 1]) {
+    cyl(0.46, 0.06, M.unit, s * 1.84, 1.18, -0.05, 'x', ch, 40);
+    const head = cyl(0.43, 0.26, M.unit, s * 2.0, 1.18, -0.05, 'x', ch, 40);
+    const dome = sphere(0.43, M.unit, s * 2.13, 1.18, -0.05, ch, 32); dome.scale.set(0.32, 1, 1);
+    for (let i = 0; i < 20; i++) { const a = i / 20 * Math.PI * 2; cyl(0.016, 0.1, M.darkSteel, s * 1.9, 1.18 + Math.cos(a) * 0.44, -0.05 + Math.sin(a) * 0.44, 'x', ch, 8); }
+  }
+  // water nozzles on the west (–x) head, Victaulic grooved
+  const noz = (y, z) => { cyl(0.11, 0.42, M.unit, -2.38, y, z, 'x', ch, 24); cyl(0.135, 0.07, M.orange, -2.55, y, z, 'x', ch, 24); };
+  noz(0.96, -0.2); noz(1.38, 0.1);
+  // flow switch (thermal dispersion) on inlet nozzle
+  cyl(0.022, 0.14, M.steel, -2.4, 1.1, -0.2, 'y', ch, 12); cyl(0.03, 0.05, M.black, -2.4, 1.2, -0.2, 'y', ch, 12);
+  anim.flowLed = sphere(0.01, new THREE.MeshBasicMaterial({ color: 0x221a00 }), -2.4, 1.23, -0.17, ch, 8);
+  // thermistor wells (EWT/LWT)
+  cyl(0.012, 0.12, M.brass, -2.25, 1.07, -0.2, 'y', ch, 8); cyl(0.012, 0.12, M.brass, -2.25, 1.5, 0.1, 'y', ch, 8);
+  // relief valves on cooler
+  for (const x of [-0.9, 0.9]) { cyl(0.03, 0.16, M.brass, x, 1.66, -0.32, 'y', ch, 12); cyl(0.04, 0.05, M.red, x, 1.77, -0.32, 'y', ch, 12); }
+  // nameplate
+  place(textPlane(['CH-1', { t: '250 TON SPLIT SCREW CHILLER · R-134a', font: 'bold 22px Arial' }, { t: 'CKT A ◄ ─────── ► CKT B', font: 'bold 22px Arial' }], 0.9, 0.24, { bg: '#f1efe7', fg: '#1b1b1b', border: '#555' }), 0, 1.25, 0.39, 0, ch);
+  // ---------- compressors (06N-pattern twin screw) on top at each end ----------
+  for (const [id, s] of [['A', -1], ['B', 1]]) {
+    const g = new THREE.Group(); g.position.set(s * 1.05, 1.83, -0.05); ch.add(g);
+    const inner = new THREE.Group(); g.add(inner);        // jitters with vibration
+    // mounting pedestals on cooler
+    box(0.12, 0.2, 0.5, M.steel, s * -0.35, -0.2, 0, g); box(0.12, 0.2, 0.5, M.steel, s * 0.32, -0.2, 0, g);
+    // motor housing (outboard end) with cooling ribs
+    cyl(0.235, 0.72, M.comp, s * 0.38, 0.06, 0, 'x', inner, 32);
+    for (let i = 0; i < 7; i++) cyl(0.245, 0.025, M.comp, s * (0.08 + i * 0.1), 0.06, 0, 'x', inner, 32);
+    sphere(0.235, M.comp, s * 0.74, 0.06, 0, inner, 24).scale.set(0.3, 1, 1);
+    // rotor housing
+    box(0.46, 0.44, 0.52, M.comp, s * -0.2, 0.06, 0, inner);
+    box(0.08, 0.5, 0.56, M.comp, s * -0.45, 0.06, 0, inner);
+    // discharge muffler (vertical) with discharge gas thermistor on top
+    cyl(0.12, 0.42, M.comp, s * -0.3, 0.42, 0.12, 'y', inner, 24);
+    cyl(0.012, 0.06, M.brass, s * -0.3, 0.66, 0.12, 'y', inner, 8);
+    // junction box & conduit
+    box(0.28, 0.2, 0.14, M.comp, s * 0.35, 0.18, 0.27, inner);
+    // loader solenoids + oil solenoid + motor cooling solenoid
+    for (let i = 0; i < 4; i++) { cyl(0.032, 0.085, M.black, s * (-0.32 + i * 0.09), 0.32, -0.27, 'y', inner, 12); box(0.05, 0.03, 0.05, M.black, s * (-0.32 + i * 0.09), 0.38, -0.27, inner); }
+    // high pressure switch & oil pressure transducer
+    cyl(0.02, 0.07, M.steel, s * -0.12, 0.33, 0.27, 'y', inner, 10);
+    // nameplate
+    place(textPlane([`COMP ${id}1`, { t: 'SEMI-HERMETIC TWIN SCREW', font: 'bold 24px Arial' }], 0.24, 0.08, { bg: '#d6d6cc', fg: '#111' }), s * 0.3, 0.06, 0.24, 0, inner).rotation.y = 0;
+    anim.comp[id] = { g, inner };
+    // suction line: from top of cooler at the very end up into the motor end (suction-gas cooled motor)
+    pipe([V3(s * 1.62, 1.55, -0.05), V3(s * 1.62, 1.89, -0.05), V3(s * 1.84, 1.89, -0.05)], 0.07, M.unitDark, { parent: ch, seg: 20 });
+    flangeAt(V3(s * 1.62, 1.6, -0.05), V3(0, 1, 0), 0.07, ch, M.unitDark);
+    flangeAt(V3(s * 1.78, 1.89, -0.05), V3(1, 0, 0), 0.07, ch, M.unitDark);
+    // suction service valve body
+    box(0.14, 0.12, 0.16, M.unitDark, s * 1.62, 1.73, -0.05, ch);
+    // discharge: muffler → down the front → oil separator
+    pipe([V3(s * 0.75, 2.42, 0.07), V3(s * 0.75, 2.42, 0.55), V3(s * 0.75, 0.7, 0.55), V3(s * 0.75, 0.7, 0.32)], 0.05, M.unitDark, { parent: ch });
+    box(0.12, 0.14, 0.12, M.unitDark, s * 0.75, 1.5, 0.55, ch);            // discharge service valve
+    cyl(0.015, 0.1, M.red, s * 0.75, 1.62, 0.55, 'y', ch, 8);
+    // oil lines (separator → compressor)
+    pipe([V3(s * 1.3, 0.62, 0.38), V3(s * 1.3, 0.62, 0.5), V3(s * 1.3, 2.12, 0.5), V3(s * 1.2, 2.12, 0.25)], 0.012, M.copper, { parent: ch, seg: 8 });
+    // oil pump (prelube) on separator
+    const op = new THREE.Group(); op.position.set(s * 1.25, 0.33, 0.55); ch.add(op);
+    cyl(0.07, 0.2, M.motor, 0, 0, 0, 'x', op, 16); box(0.12, 0.12, 0.1, M.comp, s * -0.15, 0, 0, op);
+    anim['oilpump' + id] = op;
+    // motor cooling / economizer line (brazed-plate economizer at the back)
+    const ex = s * 0.85;
+    box(0.13, 0.5, 0.26, M.steel, ex, 0.95, -0.62, ch);                  // brazed plate economizer
+    for (let i = 0; i < 9; i++) box(0.135, 0.008, 0.262, M.darkSteel, ex, 0.73 + i * 0.055, -0.62, ch);
+    pipe([V3(ex, 1.2, -0.62), V3(ex, 1.55, -0.62), V3(s * 0.7, 1.55, -0.62), V3(s * 0.7, 2.05, -0.25)], 0.014, M.copper, { parent: ch, seg: 8 });
+    // EXV (stepper) feeding the cooler bottom
+    const exvG = new THREE.Group(); exvG.position.set(s * 0.45, 0.66, -0.62); ch.add(exvG);
+    cyl(0.055, 0.16, M.steel, 0, 0.18, 0, 'y', exvG, 16); cyl(0.045, 0.14, M.black, 0, 0.33, 0, 'y', exvG, 16);
+    box(0.12, 0.1, 0.1, M.brass, 0, 0.05, 0, exvG);
+    const sg = cyl(0.03, 0.02, M.glass, 0, 0.05, 0.055, 'z', exvG, 16);
+    pipe([V3(s * 0.45, 0.66, -0.62), V3(s * 0.45, 0.66, -0.4), V3(s * 0.45, 0.82, -0.4)], 0.024, M.copper, { parent: ch, seg: 10 });
+    pipe([V3(ex, 0.72, -0.62), V3(ex, 0.66, -0.62), V3(s * 0.5, 0.66, -0.62)], 0.024, M.copper, { parent: ch, seg: 10 });
+    anim['exv' + id] = exvG;
+    // service gauge port caps
+    cyl(0.01, 0.03, M.brass, s * 1.62, 1.95, 0.02, 'y', ch, 8);
+  }
+  // ---------- control box (east end) ----------
+  const cb = new THREE.Group(); cb.position.set(2.62, 0, 0); ch.add(cb);
+  box(0.55, 1.85, 1.25, M.unit, 0, 1.12, 0, cb);
+  box(0.02, 1.75, 0.6, M.unitDark, 0.285, 1.12, -0.31, cb); box(0.02, 1.75, 0.6, M.unitDark, 0.285, 1.12, 0.31, cb);
+  for (const z of [-0.05, 0.05]) box(0.03, 0.12, 0.02, M.black, 0.3, 1.2, z, cb);
+  box(0.6, 0.06, 1.3, M.unitDark, 0, 2.07, 0, cb);
+  place(textPlane([{ t: 'DANGER', font: 'bold 60px Arial', c: '#fff' }, { t: 'HAZARDOUS VOLTAGE', font: 'bold 34px Arial', c: '#fff' }], 0.22, 0.12, { bg: '#c8102e', fg: '#fff' }), 0.297, 1.82, 0.31, Math.PI / 2, cb);
+  place(textPlane(['ENABLE / OFF / REMOTE CONTACT'], 0.3, 0.04, { bg: '#222', fg: '#fff', font: 'bold 30px Arial' }), 0.297, 1.53, -0.31, Math.PI / 2, cb);
+  place(textPlane(['EMERGENCY ON / OFF'], 0.22, 0.04, { bg: '#222', fg: '#fff', font: 'bold 30px Arial' }), 0.297, 1.53, -0.04, Math.PI / 2, cb);
+  anim.cb = cb;
+  // conduit to ceiling
+  rod(V3(CH.x + 2.62, 2.1, CH.z + 0.3), V3(CH.x + 2.62, ROOM.h - 0.65, CH.z + 0.3), 0.035, M.conduit);
+  rod(V3(CH.x + 2.62, 2.1, CH.z - 0.3), V3(CH.x + 2.62, ROOM.h - 0.65, CH.z - 0.3), 0.025, M.conduit);
+  collider(CH.x - 2.8, CH.x + 3.0, CH.z - 1.0, CH.z + 0.9);
+}
+
+// ---------- refrigerant lines to / from roof ----------
+anim.sight = {};
+{
+  const cop = M.copper;
+  for (const [id, s] of [['A', -1], ['B', 1]]) {
+    const xD = CH.x + s * 0.25, xL = CH.x + s * 1.25;
+    // discharge riser from oil separator top to roof (2-5/8" OD)
+    pipe([V3(xD, 0.5, CH.z + 0.0), V3(xD, 0.5, CH.z - 0.8), V3(xD, ROOM.h - 0.3, CH.z - 0.8), V3(xD, ROOM.h - 0.3, CH.z - 5.3), V3(xD, ROOM.h + 0.2, CH.z - 5.3)], 0.034, cop);
+    // relief + label
+    place(pipeLabel(`CKT ${id} HOT GAS ▲ TO ROOF`, '#c8102e', 0.5, 0.07), xD, 2.6, CH.z - 0.76, 0);
+    // liquid line from roof (1-5/8"), filter drier, liquid line solenoid, sight glass → economizer
+    const zl = CH.z - 1.05;
+    pipe([V3(xL, ROOM.h + 0.2, CH.z - 5.6), V3(xL, ROOM.h - 0.45, CH.z - 5.6), V3(xL, ROOM.h - 0.45, zl), V3(xL, 2.0, zl)], 0.024, cop);
+    pipe([V3(xL, 1.0, zl), V3(xL, 0.72, zl), V3(CH.x + s * 0.85, 0.72, zl), V3(CH.x + s * 0.85, 0.72, CH.z - 0.74)], 0.024, cop);
+    cyl(0.06, 0.38, M.steel, xL, 2.0 - 0.0, zl, 'y').position.y = 1.82;    // filter drier
+    cyl(0.07, 0.04, M.steel, xL, 2.02, zl, 'y'); cyl(0.07, 0.04, M.steel, xL, 1.62, zl, 'y');
+    pipe([V3(xL, 1.62, zl), V3(xL, 1.0, zl)], 0.024, cop);
+    // LLSV
+    box(0.1, 0.09, 0.09, M.brass, xL, 1.38, zl); box(0.09, 0.11, 0.09, M.black, xL, 1.48, zl);
+    rod(V3(xL, 1.54, zl), V3(xL, 2.3, zl - 0.2), 0.008, M.black);
+    // sight glass / moisture indicator
+    const sgG = new THREE.Group(); sgG.position.set(xL, 1.15, zl); scene.add(sgG);
+    cyl(0.04, 0.06, M.brass, 0, 0, 0, 'z', sgG, 16);
+    const win = new THREE.Mesh(new THREE.CircleGeometry(0.028, 24), new THREE.MeshBasicMaterial({ color: 0x2f9c55 })); win.position.z = 0.032; sgG.add(win);
+    const bub = [];
+    for (let i = 0; i < 7; i++) { const b = new THREE.Mesh(new THREE.CircleGeometry(0.004 + Math.random() * 0.004, 10), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })); b.position.z = 0.034; b.visible = false; sgG.add(b); bub.push(b); }
+    anim.sight[id] = { win, bub };
+    // manual liquid-line ball valve (service) — clickable handle
+    const bv = new THREE.Group(); bv.position.set(xL, 0.86, zl); scene.add(bv);
+    box(0.07, 0.07, 0.07, M.brass, 0, 0, 0, bv);
+    const handle = new THREE.Group(); handle.position.y = 0.05; bv.add(handle);
+    const h = box(0.03, 0.015, 0.2, M.red, 0, 0, 0.08, handle);
+    anim['ballValve' + id] = handle;
+    clickable(h, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'ballValve', id } })));
+    place(pipeLabel(`CKT ${id} LIQUID ▼`, '#2b4fa8', 0.42, 0.06), xL, 2.4, zl + 0.03, 0);
+    // roof penetrations (pitch pockets)
+    box(0.5, 0.25, 0.35, M.darkSteel, (xD + xL) / 2, ROOM.h - 0.12, CH.z - 5.45);
+  }
+  place(textPlane(['TO 14-FAN AIR-COOLED CONDENSER ON ROOF', { t: '(CKT A: FANS 1-7 · CKT B: FANS 8-14)', font: 'bold 26px Arial' }], 1.6, 0.18, { bg: '#ffffff', fg: '#111', border: '#333' }), CH.x, ROOM.h - 0.95, CH.z - 5.1, 0);
+}
+
+// ---------- refrigerant service gauge manifold hung on circuit A ----------
+anim.manifold = {};
+{
+  const g = new THREE.Group(); g.position.set(CH.x - 1.7, 1.55, CH.z + 0.62); scene.add(g);
+  box(0.32, 0.07, 0.06, new THREE.MeshStandardMaterial({ color: 0x3b3e42, metalness: 0.6, roughness: 0.4 }), 0, 0, 0, g);
+  const lo = makeGauge({ r: 0.06, min: -30, max: 250, major: 7, minor: 4, unit: 'PSIG', title: 'R-134a', face: '#e9f0ff', ring: new THREE.MeshStandardMaterial({ color: 0x1f5fb0, roughness: 0.4 }), dual: [[-6.5, '0°'], [26, '30°'], [55, '50°'], [117, '90°'], [185, '125°']] });
+  lo.group.position.set(-0.09, 0.1, 0.02); g.add(lo.group);
+  const hi = makeGauge({ r: 0.06, min: 0, max: 500, major: 5, minor: 5, unit: 'PSIG', title: 'R-134a', face: '#fff0f0', ring: new THREE.MeshStandardMaterial({ color: 0xb3261e, roughness: 0.4 }), dual: [[57, '60°'], [117, '90°'], [185, '125°'], [287, '160°']] });
+  hi.group.position.set(0.09, 0.1, 0.02); g.add(hi.group);
+  // hoses
+  const hose = (col, a, b, c) => { const curve = new THREE.CatmullRomCurve3([a, b, c]); const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 0.006, 8), new THREE.MeshStandardMaterial({ color: col, roughness: 0.6 })); scene.add(m); };
+  hose(0x1f5fb0, V3(CH.x - 1.79, 1.52, CH.z + 0.62), V3(CH.x - 2.0, 1.2, CH.z + 0.9), V3(CH.x - 2.62, 1.95, CH.z + 0.02));
+  hose(0xb3261e, V3(CH.x - 1.61, 1.52, CH.z + 0.62), V3(CH.x - 1.3, 1.0, CH.z + 0.9), V3(CH.x - 1.0, 0.95, CH.z + 0.75));
+  hose(0xe2b21c, V3(CH.x - 1.7, 1.52, CH.z + 0.62), V3(CH.x - 1.7, 0.9, CH.z + 0.8), V3(CH.x - 1.5, 0.12, CH.z + 1.1));
+  // hook
+  rod(V3(CH.x - 1.7, 1.6, CH.z + 0.62), V3(CH.x - 1.7, 1.75, CH.z + 0.45), 0.004, M.steel);
+  anim.manifold = { lo, hi };
+}
+
+// =====================================================================
+//  CHILLED WATER PIPING, PUMPS, AIR SEPARATOR, EXPANSION TANK
+// =====================================================================
+anim.gauges = {};
+const CHWS = '#1f6fb5', CHWR = '#1f6fb5';
+const R8 = 0.155;   // 8" pipe with insulation
+function insulatedPipe(points, opts = {}) { return pipe(points, R8, M.jacket, { seg: 22, ...opts }); }
+function butterfly(p, axis, { clickId = null, label = null } = {}) {
+  const g = new THREE.Group(); g.position.copy(p); scene.add(g);
+  const body = cyl(0.17, 0.1, M.unitDark, 0, 0, 0, axis, g, 24);
+  box(0.06, 0.18, 0.06, M.unitDark, 0, 0.22, 0, g);
+  const gear = box(0.14, 0.1, 0.12, M.red, 0, 0.34, 0, g);
+  const wheel = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.012, 8, 28), M.red);
+  const wg = new THREE.Group(); wg.position.set(0.12, 0.34, 0); g.add(wg); wheel.rotation.y = Math.PI / 2; wg.add(wheel);
+  for (let i = 0; i < 4; i++) { const sp = box(0.004, 0.22, 0.012, M.red, 0, 0, 0, wg); sp.rotation.x = i * Math.PI / 4; }
+  const ind = box(0.12, 0.012, 0.03, M.yellow, 0, 0.405, 0, g);
+  if (clickId) for (const m of [wheel, gear]) clickable(m, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: clickId } })));
+  return { g, wheel: wg, ind };
+}
+{
+  const z1 = CH.z - 0.2, z2 = CH.z + 0.1;    // inlet / outlet planes
+  const xN = CH.x - 2.62;                     // nozzle face
+  // --- primary pump P1 (base mounted end suction, 1750 rpm) ---
+  const mkPump = (x, z, big, name) => {
+    const g = new THREE.Group(); g.position.set(x, 0, z); scene.add(g);
+    box(2.1, 0.12, 0.9, M.pad, 0.25, 0.06, 0, g);
+    box(1.85, 0.12, 0.42, M.steel, 0.3, 0.18, 0, g);
+    // volute
+    const vol = cyl(big ? 0.3 : 0.26, 0.24, M.pump, -0.4, 0.6, 0, 'x', g, 32);
+    cyl(0.12, 0.3, M.pump, -0.65, 0.6, 0, 'x', g, 20);                // suction neck
+    cyl(0.1, 0.35, M.pump, -0.4, 0.95, 0, 'y', g, 20);                 // discharge neck
+    // bearing frame
+    cyl(0.08, 0.38, M.pump, -0.06, 0.6, 0, 'x', g, 16); box(0.18, 0.36, 0.22, M.pump, -0.06, 0.38, 0, g);
+    // coupling guard (open mesh look) + visible spinning coupling
+    const guard = box(0.32, 0.2, 0.24, M.yellow, 0.3, 0.62, 0, g); guard.material = guard.material.clone(); guard.material.transparent = true; guard.material.opacity = 0.55;
+    const coup = new THREE.Group(); coup.position.set(0.3, 0.6, 0); g.add(coup);
+    cyl(0.07, 0.18, M.darkSteel, 0, 0, 0, 'x', coup, 12); box(0.19, 0.03, 0.15, M.black, 0, 0, 0, coup);
+    // motor (TEFC with fins and fan cowl)
+    const mlen = big ? 0.85 : 0.7, mr = big ? 0.24 : 0.2;
+    cyl(mr, mlen, M.motor, 0.5 + mlen / 2, 0.6, 0, 'x', g, 28);
+    for (let i = 0; i < 9; i++) box(mlen * 0.9, 0.012, 0.02, M.motor, 0.5 + mlen / 2, 0.6 + Math.cos(i / 9 * Math.PI * 2) * mr, Math.sin(i / 9 * Math.PI * 2) * mr, g).rotation.x = i / 9 * Math.PI * 2;
+    cyl(mr * 1.02, 0.18, M.motor, 0.5 + mlen + 0.09, 0.6, 0, 'x', g, 28);
+    box(0.16, 0.14, 0.14, M.motor, 0.5 + mlen / 2, 0.6 + mr + 0.06, 0, g);         // terminal box
+    box(mlen * 0.8, 0.22, 0.4, M.motor, 0.5 + mlen / 2, 0.3, 0, g);                 // feet
+    place(textPlane([name, { t: big ? '25 HP · 1750 RPM · ON VFD' : '15 HP · 1750 RPM · ATL', font: 'bold 26px Arial' }], 0.34, 0.1, { bg: '#f4f1e6', fg: '#111' }), 0.5 + mlen / 2, 0.6, mr + 0.002, 0, g);
+    collider(x - 0.85, x + 1.4, z - 0.5, z + 0.5);
+    return { g, coup };
+  };
+  const P1 = mkPump(-7.3, z1, false, 'CHWP-1 PRIMARY');
+  const P2 = mkPump(-7.3, CH.z + 4.4, true, 'CHWP-2 SECONDARY');
+  anim.P1 = P1; anim.P2 = P2;
+  const zP2 = CH.z + 4.4;
+  // --- primary loop: return main → air separator → strainer → P1 → cooler inlet ---
+  const xs = -9.8, zr = CH.z - 2.4;
+  insulatedPipe([V3(-12.1, 5.0, zr), V3(-9.0, 5.0, zr)]);
+  insulatedPipe([V3(xs, 5.0, zr), V3(xs, 1.85, zr)], { joints: false });
+  // air separator (vertical)
+  cyl(0.3, 1.0, M.green, xs, 1.3, zr, 'y', scene, 28); sphere(0.3, M.green, xs, 1.8, zr, scene, 24).scale.y = 0.4; sphere(0.3, M.green, xs, 0.8, zr, scene, 24).scale.y = 0.4;
+  cyl(0.03, 0.15, M.brass, xs, 1.98, zr, 'y'); place(textPlane(['AIR SEPARATOR'], 0.34, 0.06, { bg: '#fff', fg: '#111', font: 'bold 34px Arial' }), xs, 1.35, zr + 0.305, 0);
+  collider(xs - 0.4, xs + 0.4, zr - 0.4, zr + 0.4);
+  // expansion tank
+  cyl(0.32, 1.2, M.galv, -11.2, 0.85, zr - 1.4, 'y', scene, 28); sphere(0.32, M.galv, -11.2, 1.45, zr - 1.4, scene, 24).scale.y = 0.45; sphere(0.32, M.galv, -11.2, 0.25, zr - 1.4, scene, 24).scale.y = 0.4;
+  pipe([V3(-11.2, 0.15, zr - 1.4), V3(-11.2, 0.12, zr - 0.5), V3(xs, 0.12, zr - 0.5), V3(xs, 0.7, zr)], 0.03, M.steel);
+  place(textPlane(['EXPANSION TANK'], 0.4, 0.07, { bg: '#fff', fg: '#111', font: 'bold 34px Arial' }), -11.2, 1.0, zr - 1.4 + 0.325, 0);
+  collider(-11.6, -10.8, zr - 1.8, zr - 1.0);
+  // chemical pot feeder
+  cyl(0.13, 0.5, M.galv, -11.5, 0.45, zr + 0.9, 'y', scene, 18);
+  // separator bottom → down → toward pump suction
+  insulatedPipe([V3(xs, 0.75, zr), V3(xs, 0.6, zr), V3(xs, 0.6, z1), V3(-8.0, 0.6, z1)]);
+  // Y-strainer
+  const ys = cyl(0.17, 0.38, M.unitDark, -8.55, 0.6, z1, 'x', scene, 22); const ysb = cyl(0.12, 0.3, M.unitDark, -8.5, 0.42, z1, 'y', scene, 18); ysb.rotation.z = 0.6;
+  place(textPlane(['STRAINER'], 0.22, 0.05, { bg: '#fff', fg: '#111', font: 'bold 34px Arial' }), -8.55, 0.82, z1 + 0.18, 0);
+  // pump discharge → up → over → cooler inlet (with check valve, isolation butterfly)
+  const pd = [V3(-7.7, 1.1, z1), V3(-7.7, 1.75, z1), V3(xN - 1.0, 1.75, z1), V3(xN - 1.0, 0.96, z1), V3(xN, 0.96, z1)];
+  insulatedPipe(pd);
+  box(0.36, 0.28, 0.36, M.unitDark, -7.7, 1.3, z1);                                  // triple-duty / check valve
+  const iso = butterfly(V3(xN - 0.45, 0.96, z1), 'x', { clickId: 'isoValve' });
+  anim.isoValve = iso;
+  // cooler outlet → up to supply header
+  insulatedPipe([V3(xN, 1.38, z2), V3(xN - 0.6, 1.38, z2), V3(xN - 0.6, 4.6, z2), V3(-9.0, 4.6, z2), V3(-10.6, 4.6, z2), V3(-10.6, 4.6, zP2), V3(-10.6, 0.6, zP2), V3(-8.0, 0.6, zP2)]);
+  butterfly(V3(xN - 0.6, 2.1, z2), 'y');
+  // decoupler: supply header ↔ return main
+  insulatedPipe([V3(-9.0, 4.6, z2), V3(-9.0, 4.6, zr), V3(-9.0, 5.0, zr)]);
+  place(textPlane(['DECOUPLER (COMMON PIPE)'], 0.6, 0.08, { bg: '#fff', fg: '#111', font: 'bold 34px Arial' }), -9.0, 4.35, (z2 + zr) / 2, Math.PI / 2);
+  // secondary pump discharge → up → west wall to building
+  insulatedPipe([V3(-7.7, 1.1, zP2), V3(-7.7, 5.25, zP2), V3(-12.1, 5.25, zP2)]);
+  box(0.36, 0.28, 0.36, M.unitDark, -7.7, 1.35, zP2);
+  // pipe labels
+  const lbl = (t, x, y, z, ry = 0) => place(pipeLabel(t, '#1d6a2e', 0.7, 0.12), x, y, z, ry);
+  lbl('CHWR ◄ FROM BUILDING', -11.0, 5.0, zr + R8 + 0.005);
+  lbl('CHWS ► TO BUILDING', -11.0, 5.25, zP2 + R8 + 0.005);
+  lbl('CHWS ▲ FROM CH-1', xN - 0.6 + R8 + 0.005, 3.2, z2, Math.PI / 2);
+  lbl('CHWR ► TO CH-1', -6.0, 1.75, z1 + R8 + 0.005);
+  // gauges & thermometers at cooler (physical dials)
+  const mountGauge = (key, p, ry, opts) => { const gg = makeGauge(opts); gg.group.position.copy(p); gg.group.rotation.y = ry; scene.add(gg.group); rod(V3(p.x, p.y - 0.09, p.z - 0.0), V3(p.x, p.y - 0.25, p.z), 0.008, M.brass); anim.gauges[key] = gg; return gg; };
+  mountGauge('evIn_p', V3(xN - 0.85, 1.22, z1 + 0.04), 0, { r: 0.055, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'CHWR' });
+  mountGauge('evIn_t', V3(xN - 0.65, 1.22, z1 + 0.04), 0, { r: 0.055, min: 30, max: 90, major: 6, minor: 2, unit: '°F', title: 'CHWR' });
+  mountGauge('evOut_p', V3(xN - 0.25, 1.68, z2 + 0.17), 0, { r: 0.055, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'CHWS' });
+  mountGauge('evOut_t', V3(xN - 0.05, 1.68, z2 + 0.17), 0, { r: 0.055, min: 30, max: 90, major: 6, minor: 2, unit: '°F', title: 'CHWS' });
+  mountGauge('p1s', V3(-8.2, 0.95, z1 + 0.05), 0, { r: 0.05, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'SUCT' });
+  mountGauge('p1d', V3(-7.45, 1.55, z1 + 0.05), 0, { r: 0.05, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'DISCH' });
+  mountGauge('p2d', V3(-7.45, 1.6, zP2 + 0.05), 0, { r: 0.05, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'DISCH' });
+  mountGauge('p2s', V3(-8.2, 0.95, zP2 + 0.05), 0, { r: 0.05, min: 0, max: 100, major: 10, minor: 2, unit: 'PSI', title: 'SUCT' });
+  // pipe hangers (rods to deck)
+  for (const [x, z] of [[-11, zr], [-10, zr], [-8, z2], [-6, z2], [xN - 0.6, z2], [-11.4, zP2], [-9.5, zP2]]) {
+    const y = x < -9.5 && z === zr ? 5.0 : z === zP2 ? 5.25 : 4.6;
+    rod(V3(x, y + R8, z), V3(x, ROOM.h - 0.6, z), 0.01, M.steel);
+    const r = new THREE.Mesh(new THREE.TorusGeometry(R8 + 0.01, 0.01, 6, 24), M.steel); r.position.set(x, y, z); r.rotation.y = Math.PI / 2; scene.add(r);
+  }
+}
+
+// =====================================================================
+//  ELECTRICAL — switchboard, transformer, panels, starter, VFD, disconnects
+// =====================================================================
+anim.screens = {};
+{
+  // ---- main switchboard MSB (east wall) ----
+  const sb = new THREE.Group(); sb.position.set(11.5, 0, -4.75); sb.rotation.y = -Math.PI / 2; scene.add(sb);
+  box(4.0, 0.08, 1.0, M.pad, 0, 0.04, 0, sb);
+  box(3.9, 2.3, 0.9, M.elec, 0, 1.23, 0, sb);
+  for (let i = 0; i < 4; i++) {
+    const x = -1.46 + i * 0.975;
+    box(0.93, 2.2, 0.02, M.elecDark, x, 1.23, 0.455, sb);
+    for (let k = 0; k < 4; k++) { box(0.08, 0.04, 0.03, M.black, x + 0.35, 0.6 + k * 0.5, 0.47, sb); }
+  }
+  place(textPlane(['MSB · 480Y/277V · 3Ø 4W · 1600A'], 1.6, 0.1, { bg: '#ffffff', fg: '#111', font: 'bold 34px Arial' }), 0, 2.22, 0.47, 0, sb);
+  place(textPlane([{ t: 'DANGER', font: 'bold 60px Arial', c: '#fff' }, { t: 'ARC FLASH & SHOCK HAZARD', font: 'bold 30px Arial', c: '#fff' }], 0.4, 0.16, { bg: '#c8102e' }), 1.0, 1.85, 0.47, 0, sb);
+  // main breaker with big handle (clickable)
+  box(0.5, 0.6, 0.06, M.black, -1.46, 1.35, 0.48, sb);
+  const mbH = new THREE.Group(); mbH.position.set(-1.46, 1.35, 0.52); sb.add(mbH);
+  const mbHandle = box(0.08, 0.26, 0.06, M.red, 0, 0.08, 0, mbH);
+  clickable(mbHandle, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'mainBreaker' } })));
+  place(textPlane(['MAIN 1600A', { t: 'ON ▲  ▼ OFF', font: 'bold 28px Arial' }], 0.3, 0.1, { bg: '#fff', fg: '#111' }), -1.46, 1.75, 0.481, 0, sb);
+  anim.mainBreaker = mbH;
+  // power meter display
+  anim.screens.meter = makeScreen(0.24, 0.16, 320, 214, sb, -0.49, 1.55, 0.475);
+  place(textPlane(['MAIN POWER METER'], 0.26, 0.035, { bg: '#222', fg: '#fff', font: 'bold 30px Arial' }), -0.49, 1.68, 0.475, 0, sb);
+  // feeder labels
+  const feeders = ['CH-1 · 600A', 'MCC-1 / CHWP', 'T1 → LP-1 LIGHTING', 'AHU-1 · CU-1 FANS'];
+  feeders.forEach((t, i) => place(textPlane([t], 0.8, 0.06, { bg: '#fff', fg: '#111', font: 'bold 34px Arial' }), -1.46 + i * 0.975, 0.35, 0.47, 0, sb));
+  collider(10.9, 12, -6.8, -2.7);
+  // conduits from MSB to ceiling
+  for (let i = 0; i < 6; i++) rod(V3(11.5, 2.4, -6.3 + i * 0.6), V3(11.5, ROOM.h - 0.65, -6.3 + i * 0.6), 0.05, M.conduit);
+  // feeder conduit runs along ceiling to chiller disconnect
+  pipe([V3(11.5, ROOM.h - 0.65, -6.3), V3(-1.2, ROOM.h - 0.65, -6.3), V3(-1.2, ROOM.h - 0.65, -7.75), V3(-1.2, 2.2, -7.75)], 0.05, M.conduit);
+  pipe([V3(11.5, ROOM.h - 0.75, -5.7), V3(CH.x + 2.62, ROOM.h - 0.75, -5.7), V3(CH.x + 2.62, ROOM.h - 0.75, CH.z + 0.3), V3(CH.x + 2.62, ROOM.h - 0.65, CH.z + 0.3)], 0.035, M.conduit);
+  // ---- dry-type transformer T1 ----
+  const tr = new THREE.Group(); tr.position.set(11.2, 0, -1.6); scene.add(tr);
+  box(0.9, 1.3, 1.25, M.elec, 0, 0.65, 0, tr);
+  for (let i = 0; i < 9; i++) box(0.02, 0.022, 0.9, M.elecDark, -0.455, 0.25 + i * 0.05, 0, tr);
+  place(textPlane(['T1  75 kVA', { t: '480Δ – 208Y/120V', font: 'bold 28px Arial' }], 0.42, 0.14, { bg: '#fff', fg: '#111' }), -0.452, 1.05, 0, -Math.PI / 2, tr);
+  collider(10.7, 11.7, -2.3, -0.9);
+  // ---- panelboards LP-1 / HP-1 ----
+  const panel = (z, name) => { box(0.15, 1.2, 0.55, M.elec, 11.88, 1.55, z); box(0.01, 1.1, 0.5, M.elecDark, 11.80, 1.55, z); place(textPlane([name], 0.3, 0.06, { bg: '#fff', fg: '#111', font: 'bold 40px Arial' }), 11.795, 2.0, z, -Math.PI / 2); rod(V3(11.88, 2.15, z), V3(11.88, ROOM.h - 0.65, z), 0.03, M.conduit); };
+  panel(0.0, 'LP-1'); panel(0.75, 'HP-1');
+  // ---- condenser fan disconnect (roof CU-1 fans) ----
+  box(0.18, 0.55, 0.38, M.elec, 11.88, 1.55, 2.0);
+  const cfdH = new THREE.Group(); cfdH.position.set(11.78, 1.55, 2.12); scene.add(cfdH);
+  const cfdHandle = box(0.05, 0.22, 0.05, M.red, 0, 0.06, 0, cfdH);
+  clickable(cfdHandle, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'condFanBreaker' } })));
+  place(textPlane(['CU-1 CONDENSER', { t: 'FAN DISCONNECT', font: 'bold 34px Arial' }, { t: 'ON ▲ ▼ OFF', font: 'bold 30px Arial' }], 0.3, 0.13, { bg: '#fff', fg: '#111' }), 11.785, 1.95, 2.0, -Math.PI / 2);
+  rod(V3(11.88, 1.83, 2.0), V3(11.88, ROOM.h - 0.65, 2.0), 0.03, M.conduit);
+  anim.condFanBreaker = cfdH;
+  // ---- chiller fused disconnect (north wall) ----
+  box(0.6, 0.85, 0.25, M.elec, -1.2, 1.6, -7.86);
+  const cdH = new THREE.Group(); cdH.position.set(-0.85, 1.6, -7.7); scene.add(cdH);
+  const cdHandle = box(0.06, 0.3, 0.06, M.red, 0, 0.1, 0, cdH);
+  clickable(cdHandle, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'chillerDisc' } })));
+  place(textPlane(['CH-1 DISCONNECT', { t: '600A FUSED · 480V', font: 'bold 30px Arial' }, { t: 'ON ▲ ▼ OFF', font: 'bold 30px Arial' }], 0.45, 0.16, { bg: '#fff', fg: '#111' }), -1.25, 2.15, -7.73, 0);
+  anim.chillerDisc = cdH;
+  pipe([V3(-1.2, 1.18, -7.75), V3(-1.2, 0.12, -7.75), V3(-1.2, 0.12, CH.z - 1.0), V3(CH.x + 2.62, 0.12, CH.z - 1.0), V3(CH.x + 2.62, 0.25, CH.z - 0.45)], 0.05, M.conduit);
+  // ---- P1 combination starter with HOA (west wall) ----
+  const st = new THREE.Group(); st.position.set(-11.88, 1.45, CH.z - 0.2); st.rotation.y = Math.PI / 2; scene.add(st);
+  box(0.5, 0.75, 0.25, M.elec, 0, 0, 0, st);
+  place(textPlane(['CHWP-1 STARTER', { t: 'HAND · OFF · AUTO', font: 'bold 30px Arial' }], 0.42, 0.11, { bg: '#fff', fg: '#111' }), 0, 0.27, 0.127, 0, st);
+  const hoa1 = new THREE.Group(); hoa1.position.set(-0.08, -0.05, 0.13); st.add(hoa1);
+  cyl(0.045, 0.03, M.black, 0, 0, 0, 'z', hoa1, 20);
+  const hoa1K = box(0.02, 0.07, 0.03, M.white, 0, 0, 0.025, hoa1);
+  clickable(hoa1K, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'hoa1' } })));
+  clickable(hoa1.children[0], () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'hoa1' } })));
+  anim.hoa1 = hoa1;
+  anim.p1RunLight = sphere(0.022, new THREE.MeshBasicMaterial({ color: 0x1a3a1a }), 0.12, -0.05, 0.14, st, 12);
+  place(textPlane(['RUN'], 0.06, 0.025, { bg: '#222', fg: '#fff', font: 'bold 40px Arial' }), 0.12, -0.1, 0.127, 0, st);
+  rod(V3(-11.88, 1.85, CH.z - 0.2), V3(-11.88, ROOM.h - 0.65, CH.z - 0.2), 0.03, M.conduit);
+  pipe([V3(-11.88, 1.1, CH.z - 0.2), V3(-11.88, 0.12, CH.z - 0.2), V3(-7.3 + 0.95, 0.12, CH.z - 0.2), V3(-7.3 + 0.95, 0.7, CH.z - 0.2)], 0.02, M.conduit);
+  // ---- VFD for CHWP-2 (west wall) ----
+  const vf = new THREE.Group(); vf.position.set(-11.85, 1.6, CH.z + 4.4); vf.rotation.y = Math.PI / 2; scene.add(vf);
+  box(0.6, 1.1, 0.32, M.elec, 0, 0, 0, vf);
+  for (let i = 0; i < 6; i++) box(0.4, 0.015, 0.02, M.black, 0, -0.45 + i * 0.035, 0.165, vf);
+  place(textPlane(['VFD-2 · CHWP-2', { t: '25 HP · 480V', font: 'bold 30px Arial' }], 0.4, 0.1, { bg: '#fff', fg: '#111' }), 0, 0.45, 0.162, 0, vf);
+  box(0.24, 0.3, 0.02, M.black, 0, 0.13, 0.165, vf);
+  anim.screens.vfd = makeScreen(0.18, 0.09, 256, 128, vf, 0, 0.2, 0.177);
+  // keypad HAND / OFF / AUTO buttons
+  const kb = (lbl, x, col) => { const b = box(0.05, 0.03, 0.015, new THREE.MeshStandardMaterial({ color: col, roughness: 0.4 }), x, 0.03, 0.18, vf); place(textPlane([lbl], 0.05, 0.018, { bg: '#111', fg: '#fff', font: 'bold 60px Arial' }), x, 0.0, 0.176, 0, vf); clickable(b, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'vfdKey', v: lbl } }))); return b; };
+  anim.vfdKeys = { HAND: kb('HAND', -0.065, 0x3a6ea5), OFF: kb('OFF', 0, 0xb3261e), AUTO: kb('AUTO', 0.065, 0x2e7d32) };
+  rod(V3(-11.85, 2.15, CH.z + 4.4), V3(-11.85, ROOM.h - 0.65, CH.z + 4.4), 0.035, M.conduit);
+  pipe([V3(-11.85, 1.05, CH.z + 4.4), V3(-11.85, 0.12, CH.z + 4.4), V3(-7.3 + 1.05, 0.12, CH.z + 4.4), V3(-7.3 + 1.05, 0.7, CH.z + 4.4)], 0.025, M.conduit);
+  anim.vfdFan = vf;
+}
+
+// =====================================================================
+//  AIR HANDLER AHU-1 (with chilled-water coil) + exhaust fan
+// =====================================================================
+{
+  const g = new THREE.Group(); g.position.set(6.2, 0, 5.75); scene.add(g);
+  box(7.0, 0.12, 2.5, M.pad, 0, 0.06, 0, g);
+  box(6.6, 2.3, 2.2, M.ahu, 0, 1.27, 0, g);
+  for (let i = 0; i < 6; i++) box(0.04, 2.3, 2.22, M.unitDark, -3.3 + i * 1.32, 1.27, 0, g);
+  // access doors facing -z (toward room)
+  const door = (x, w, lbl) => { box(w, 1.7, 0.03, M.ahu, x, 1.25, -1.115, g); box(0.04, 0.16, 0.04, M.black, x + w / 2 - 0.12, 1.25, -1.14, g); if (lbl) place(textPlane([lbl], w * 0.8, 0.08, { bg: '#fff', fg: '#111', font: 'bold 36px Arial' }), x, 2.2, -1.13, Math.PI, g); };
+  door(-2.6, 0.9, 'MIXING BOX'); door(-1.3, 0.9, 'FILTERS'); door(0.0, 0.9, 'CHW COIL'); door(1.4, 1.1, 'SUPPLY FAN'); door(2.75, 0.8, 'DISCHARGE');
+  // fan section viewing window with spinning wheel
+  const win = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.55), M.glass); win.position.set(1.4, 1.35, -1.135); win.rotation.y = Math.PI; g.add(win);
+  const wheel = new THREE.Group(); wheel.position.set(1.4, 1.35, -0.5); g.add(wheel);
+  for (let i = 0; i < 12; i++) { const b = box(0.05, 0.42, 0.5, M.galv, 0, 0, 0, wheel); b.rotation.z = i / 12 * Math.PI * 2; b.position.set(Math.sin(i / 12 * Math.PI * 2) * 0.28, Math.cos(i / 12 * Math.PI * 2) * 0.28, 0); }
+  cyl(0.1, 0.55, M.darkSteel, 0, 0, 0, 'z', wheel, 16);
+  anim.ahuWheel = wheel;
+  // inside lighting of fan section
+  const il = new THREE.PointLight(0xffffff, 0.8, 1.6, 2); il.position.set(1.4, 1.6, -0.8); g.add(il);
+  // supply duct to ceiling
+  box(1.6, ROOM.h - 2.42, 0.9, M.galv, 2.6, 2.42 + (ROOM.h - 2.42) / 2, 0.3, g);
+  box(1.4, ROOM.h - 2.42, 0.9, M.galv, -2.7, 2.42 + (ROOM.h - 2.42) / 2, 0.3, g);  // return duct
+  for (let y = 3; y < ROOM.h; y += 0.6) { box(1.64, 0.03, 0.94, M.darkSteel, 2.6, y, 0.3, g); box(1.44, 0.03, 0.94, M.darkSteel, -2.7, y, 0.3, g); }
+  // magnehelic on filter section
+  const mag = makeGauge({ r: 0.06, min: 0, max: 2, major: 4, minor: 5, unit: 'IN. W.C.', title: 'FILTER ΔP', face: '#fdfdf8' });
+  mag.group.position.set(-1.3, 1.65, -1.14); mag.group.rotation.y = Math.PI; g.add(mag.group);
+  anim.gauges.mag = mag;
+  // CHW coil piping from overhead (2½")
+  pipe([V3(6.6, ROOM.h - 0.75, 4.45), V3(6.6, 1.6, 4.45), V3(6.6, 1.6, 4.62)], 0.07, M.jacket);
+  pipe([V3(7.0, ROOM.h - 0.75, 4.45), V3(7.0, 0.9, 4.45), V3(7.0, 0.9, 4.62)], 0.07, M.jacket);
+  box(0.12, 0.12, 0.12, M.brass, 7.0, 1.25, 4.45);   // control valve
+  box(0.08, 0.14, 0.08, M.black, 7.0, 1.38, 4.45);
+  anim.ahuValveActuator = box(0.02, 0.1, 0.02, M.yellow, 7.07, 1.38, 4.45);
+  // condensate trap
+  pipe([V3(6.2, 0.45, 4.62), V3(6.2, 0.45, 4.3), V3(6.2, 0.2, 4.3), V3(6.5, 0.2, 4.3), V3(6.5, 0.02, 4.3)], 0.025, new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.5 }));
+  place(textPlane(['AHU-1', { t: '24,000 CFM · CHW COIL', font: 'bold 30px Arial' }], 0.7, 0.18, { bg: '#fff', fg: '#111', border: '#333' }), -0.1, 2.52, -1.12, Math.PI, g);
+  collider(6.2 - 3.5, 6.2 + 3.5, 5.75 - 1.3, 5.75 + 1.3);
+  // exhaust fan in east wall
+  const ef = new THREE.Group(); ef.position.set(11.95, 4.4, 4.5); ef.rotation.y = -Math.PI / 2; scene.add(ef);
+  box(1.0, 1.0, 0.1, M.galv, 0, 0, 0.1, ef);
+  const blades = new THREE.Group(); blades.position.z = -0.02; ef.add(blades);
+  for (let i = 0; i < 5; i++) { const b = box(0.1, 0.4, 0.01, M.darkSteel, 0, 0.2, 0, blades); b.position.set(Math.sin(i / 5 * 6.283) * 0.2, Math.cos(i / 5 * 6.283) * 0.2, 0); b.rotation.z = -i / 5 * 6.283; b.rotation.y = 0.4; }
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.02, 6, 32), M.darkSteel); ef.add(ring);
+  anim.exhaust = blades;
+}
+
+// =====================================================================
+//  SOUTH WALL: BAS panel, refrigerant monitor, light switch, clock, board
+// =====================================================================
+{
+  // BAS touch panel
+  const bp = new THREE.Group(); bp.position.set(-3.4, 1.55, 7.9); bp.rotation.y = Math.PI; scene.add(bp);
+  box(1.08, 0.78, 0.12, M.elecDark, 0, 0, -0.05, bp);
+  anim.screens.bas = makeScreen(0.96, 0.6, 1280, 800, bp, 0, 0.02, 0.012);
+  place(textPlane(['BUILDING AUTOMATION · CHILLED WATER PLANT'], 0.8, 0.04, { bg: '#222', fg: '#ddd', font: 'bold 30px Arial' }), 0, -0.36, 0.012, 0, bp);
+  clickable(anim.screens.bas.mesh, null, { screen: 'bas' });
+  rod(V3(-3.4, 1.95, 7.95), V3(-3.4, ROOM.h - 0.65, 7.95), 0.02, M.conduit);
+  // refrigerant leak monitor (ASHRAE 15)
+  const rm = new THREE.Group(); rm.position.set(2.2, 1.6, 7.9); rm.rotation.y = Math.PI; scene.add(rm);
+  box(0.3, 0.36, 0.1, M.white, 0, 0, -0.04, rm);
+  anim.screens.leak = makeScreen(0.2, 0.1, 256, 128, rm, 0, 0.06, 0.011);
+  place(textPlane(['REFRIGERANT', { t: 'MONITOR', font: 'bold 40px Arial' }], 0.2, 0.07, { bg: '#fff', fg: '#111', font: 'bold 40px Arial' }), 0, -0.1, 0.011, 0, rm);
+  const strobe = new THREE.Group(); strobe.position.set(2.2, 2.6, 7.95); scene.add(strobe);
+  box(0.14, 0.14, 0.08, M.red, 0, 0, 0, strobe);
+  anim.strobe = cyl(0.04, 0.05, new THREE.MeshBasicMaterial({ color: 0x552222 }), 0, 0, -0.06, 'z', strobe, 12);
+  // light switch
+  box(0.08, 0.13, 0.02, M.white, 1.3, 1.25, 7.99);
+  const ls = box(0.025, 0.05, 0.02, M.white, 1.3, 1.25, 7.97);
+  clickable(ls, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'lights' } })));
+  anim.lightSwitch = ls;
+  // clock (analog, sim time)
+  const ck = new THREE.Group(); ck.position.set(-2.0, 3.0, 7.97); ck.rotation.y = Math.PI; scene.add(ck);
+  const face = new THREE.Mesh(new THREE.CircleGeometry(0.2, 40), new THREE.MeshStandardMaterial({ map: canvasTex(256, 256, (g, W, H) => { g.fillStyle = '#fafaf5'; g.beginPath(); g.arc(128, 128, 126, 0, 7); g.fill(); g.fillStyle = '#111'; g.font = 'bold 28px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle'; for (let i = 1; i <= 12; i++) { const a = i / 12 * Math.PI * 2 - Math.PI / 2; g.fillText(i, 128 + Math.cos(a) * 98, 128 + Math.sin(a) * 98); } for (let i = 0; i < 60; i++) { const a = i / 60 * Math.PI * 2; g.fillRect(128 + Math.cos(a) * 118 - 1, 128 + Math.sin(a) * 118 - 1, i % 5 ? 2 : 5, i % 5 ? 2 : 5); } }) }));
+  ck.add(face);
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(0.205, 0.015, 8, 40), M.black); ck.add(ring2);
+  const hh = new THREE.Group(), mh = new THREE.Group(), sh = new THREE.Group(); [hh, mh, sh].forEach((h, i) => { h.position.z = 0.005 + i * 0.002; ck.add(h); });
+  box(0.012, 0.11, 0.003, M.black, 0, 0.05, 0, hh); box(0.008, 0.16, 0.003, M.black, 0, 0.075, 0, mh); box(0.003, 0.17, 0.003, M.red, 0, 0.07, 0, sh);
+  anim.clock = { hh, mh, sh };
+  // instruction whiteboard
+  const wb = textPlane([
+    { t: 'CH-1 PLANT SIMULATOR', font: 'bold 54px Arial', c: '#1b3d8f' },
+    { t: 'WALK: W A S D / arrow keys  ·  RUN: Shift', font: 'bold 32px Arial' },
+    { t: 'LOOK: click-drag  ·  STEP UP/DOWN: Space / C', font: 'bold 32px Arial' },
+    { t: 'Click switches, keys, valves, breakers & screens', font: 'bold 32px Arial' },
+    { t: 'Touch: drag to look · two fingers to walk', font: 'bold 32px Arial' },
+    { t: 'Sound starts on your first click', font: 'bold 32px Arial', c: '#b3261e' },
+    { t: 'Plant auto-starts at 07:00 (← BAS touchscreen)', font: 'bold 32px Arial', c: '#2e7d32' },
+  ], 1.7, 1.0, { bg: '#fbfbf7', fg: '#222', border: '#9aa', px: 1024 });
+  place(wb, -6.6, 1.7, 7.97, Math.PI);
+  box(1.76, 1.06, 0.03, M.steel, -6.6, 1.7, 7.99);
+  // fire extinguisher + eyewash
+  cyl(0.08, 0.5, M.red, 4.5, 0.65, 7.9, 'y', scene, 16); box(0.4, 0.06, 0.04, M.red, 4.5, 1.25, 7.97);
+  place(textPlane(['FIRE', { t: 'EXTINGUISHER', font: 'bold 30px Arial' }], 0.3, 0.12, { bg: '#c8102e', fg: '#fff' }), 4.5, 1.45, 7.96, Math.PI);
+  box(0.4, 0.3, 0.1, M.green, -8.8, 1.1, 7.93);
+  place(textPlane(['EMERGENCY', { t: 'EYEWASH', font: 'bold 40px Arial' }], 0.35, 0.14, { bg: '#1c8a3b', fg: '#fff' }), -8.8, 1.5, 7.96, Math.PI);
+}
+
+// =====================================================================
+//  CHILLER CONTROL BOX FACE — display module, switches, alarm light
+// =====================================================================
+{
+  const cb = anim.cb;
+  // display module (hand-held, magnet-mounted) with 4×20 LCD
+  const nav = new THREE.Group(); nav.position.set(0.31, 1.25, 0.32); nav.rotation.y = Math.PI / 2; cb.add(nav);
+  box(0.2, 0.3, 0.04, new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.5 }), 0, 0, 0, nav);
+  anim.screens.nav = makeScreen(0.17, 0.068, 400, 160, nav, 0, 0.08, 0.021);
+  place(textPlane(['UNIT DISPLAY MODULE'], 0.17, 0.02, { bg: '#2a2d31', fg: '#ddd', font: 'bold 36px Arial' }), 0, 0.135, 0.021, 0, nav);
+  const keyMat = new THREE.MeshStandardMaterial({ color: 0x4a5560, roughness: 0.5 });
+  const keys = { ESC: [-0.055, -0.04], UP: [0, -0.01], DOWN: [0, -0.075], ENTER: [0.055, -0.04] };
+  anim.navKeys = {};
+  for (const [k, [x, y]] of Object.entries(keys)) {
+    const b = box(0.042, 0.03, 0.012, keyMat, x, y, 0.024, nav);
+    place(textPlane([k === 'UP' ? '▲' : k === 'DOWN' ? '▼' : k], 0.04, 0.016, { bg: '#4a5560', fg: '#fff', font: 'bold 70px Arial' }), x, y, 0.031, 0, nav);
+    clickable(b, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'nav', v: k } })));
+    anim.navKeys[k] = b;
+  }
+  // coiled cord
+  const pts = []; for (let i = 0; i < 60; i++) { const t = i / 59; pts.push(V3(0.31 + Math.sin(t * 40) * 0.015, 1.1 - t * 0.35, 0.32 + Math.cos(t * 40) * 0.015 + t * 0.2)); }
+  const cord = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 200, 0.004, 6), M.black); cb.add(cord);
+  // Enable/Off/Remote 3-position rotary switch
+  const sw = new THREE.Group(); sw.position.set(0.3, 1.43, -0.31); sw.rotation.y = Math.PI / 2; cb.add(sw);
+  cyl(0.04, 0.02, M.black, 0, 0, 0, 'z', sw, 24);
+  const knob = new THREE.Group(); knob.position.z = 0.02; sw.add(knob);
+  const kbar = box(0.018, 0.075, 0.025, M.white, 0, 0, 0, knob);
+  clickable(kbar, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'eor' } })));
+  clickable(sw.children[0], () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'eor' } })));
+  place(textPlane(['ENABLE'], 0.06, 0.015, { bg: '#b5b8b2', fg: '#111', font: 'bold 50px Arial' }), -0.07, 0.04, 0.001, 0, sw);
+  place(textPlane(['OFF'], 0.04, 0.015, { bg: '#b5b8b2', fg: '#111', font: 'bold 50px Arial' }), 0, 0.06, 0.001, 0, sw);
+  place(textPlane(['REMOTE'], 0.06, 0.015, { bg: '#b5b8b2', fg: '#111', font: 'bold 50px Arial' }), 0.07, 0.04, 0.001, 0, sw);
+  anim.eorKnob = knob;
+  // emergency on/off toggle
+  const es = new THREE.Group(); es.position.set(0.3, 1.43, -0.04); es.rotation.y = Math.PI / 2; cb.add(es);
+  box(0.06, 0.08, 0.02, M.black, 0, 0, 0, es);
+  const tog = new THREE.Group(); tog.position.z = 0.012; es.add(tog);
+  const tb = cyl(0.008, 0.06, M.red, 0, 0.025, 0.0, 'y', tog, 10);
+  clickable(tb, () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'estop' } })));
+  clickable(es.children[0], () => window.dispatchEvent(new CustomEvent('ctl', { detail: { k: 'estop' } })));
+  anim.estopTog = tog;
+  // alarm pilot light (field installed) & power light
+  anim.alarmLight = sphere(0.025, new THREE.MeshBasicMaterial({ color: 0x3a0e0e }), 0.3, 1.66, -0.31, cb, 14);
+  place(textPlane(['ALARM'], 0.06, 0.018, { bg: '#222', fg: '#fff', font: 'bold 50px Arial' }), 0.297, 1.62, -0.31, Math.PI / 2, cb);
+  anim.powerLight = sphere(0.025, new THREE.MeshBasicMaterial({ color: 0x113311 }), 0.3, 1.66, -0.15, cb, 14);
+  place(textPlane(['CONTROL PWR'], 0.08, 0.018, { bg: '#222', fg: '#fff', font: 'bold 40px Arial' }), 0.297, 1.62, -0.15, Math.PI / 2, cb);
+}
+
+// =====================================================================
+//  STATIC MERGE — bake non-moving meshes into one draw call per material
+// =====================================================================
+function mergeStatic() {
+  const animSet = new Set([
+    anim.comp.A.inner, anim.comp.B.inner, anim.oilpumpA, anim.oilpumpB, anim.P1.g, anim.P2.g, anim.ahuWheel, anim.exhaust,
+    anim.isoValve.g, anim.mainBreaker, anim.condFanBreaker, anim.chillerDisc, anim.hoa1, anim.eorKnob, anim.estopTog,
+    anim.clock.hh, anim.clock.mh, anim.clock.sh, anim.ballValveA, anim.ballValveB, anim.ahuValveActuator,
+    ...Object.values(anim.gauges).map(g => g.pivot), anim.manifold.lo.pivot, anim.manifold.hi.pivot,
+  ]);
+  const clickSet = new Set(clickables);
+  const isAnimated = o => { while (o) { if (animSet.has(o)) return true; o = o.parent; } return false; };
+  scene.updateMatrixWorld(true);
+  const groups = new Map();
+  scene.traverse(o => {
+    if (!o.isMesh || clickSet.has(o) || isAnimated(o) || Array.isArray(o.material)) return;
+    if (!groups.has(o.material)) groups.set(o.material, []);
+    groups.get(o.material).push(o);
+  });
+  let removed = 0;
+  for (const [mat, arr] of groups) {
+    if (arr.length < 2) continue;
+    const geos = [];
+    for (const m of arr) {
+      let g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+      for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
+      if (!g.attributes.uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+      if (!g.attributes.normal) g.computeVertexNormals();
+      g.applyMatrix4(m.matrixWorld);
+      geos.push(g);
+    }
+    const merged = mergeGeometries(geos, false);
+    if (!merged) continue;
+    const mesh = new THREE.Mesh(merged, mat); mesh.matrixAutoUpdate = false; scene.add(mesh);
+    for (const m of arr) { m.parent.remove(m); m.geometry.dispose(); removed++; }
+  }
+  return removed;
+}
+
+// =====================================================================
+//  AUDIO — all sound is synthesised from the simulation state
+// =====================================================================
+class PlantAudio {
+  constructor() { this.ctx = null; this.ready = false; this.src = {}; }
+  start() {
+    if (this.ready) { if (this.ctx.state !== 'running') this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    const ctx = this.ctx = new AC();
+    this.master = ctx.createGain(); this.master.gain.value = 0.9;
+    const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4; comp.attack.value = 0.005; comp.release.value = 0.2;
+    this.master.connect(comp); comp.connect(ctx.destination);
+    // white & pink noise buffers
+    const len = ctx.sampleRate * 3;
+    this.white = ctx.createBuffer(1, len, ctx.sampleRate);
+    const w = this.white.getChannelData(0); for (let i = 0; i < len; i++) w[i] = Math.random() * 2 - 1;
+    this.pink = ctx.createBuffer(1, len, ctx.sampleRate);
+    const p = this.pink.getChannelData(0); let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+    for (let i = 0; i < len; i++) { const x = Math.random() * 2 - 1; b0 = 0.99886 * b0 + x * 0.0555179; b1 = 0.99332 * b1 + x * 0.0750759; b2 = 0.969 * b2 + x * 0.153852; b3 = 0.8665 * b3 + x * 0.3104856; b4 = 0.55 * b4 + x * 0.5329522; b5 = -0.7616 * b5 - x * 0.016898; p[i] = (b0 + b1 + b2 + b3 + b4 + b5 + x * 0.5362) * 0.11; }
+    this.build();
+    this.ready = true;
+  }
+  panner(pos) {
+    const pn = this.ctx.createPanner();
+    pn.panningModel = 'HRTF'; pn.distanceModel = 'inverse'; pn.refDistance = 1.6; pn.rolloffFactor = 1.1; pn.maxDistance = 60;
+    pn.positionX.value = pos.x; pn.positionY.value = pos.y; pn.positionZ.value = pos.z;
+    pn.connect(this.master); return pn;
+  }
+  noise(pink = false) { const s = this.ctx.createBufferSource(); s.buffer = pink ? this.pink : this.white; s.loop = true; s.loopStart = Math.random(); s.start(0, Math.random() * 2); return s; }
+  filt(type, f, q = 0.7) { const b = this.ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; }
+  gain(v = 0) { const g = this.ctx.createGain(); g.gain.value = v; return g; }
+  osc(type, f) { const o = this.ctx.createOscillator(); o.type = type; o.frequency.value = f; o.start(); return o; }
+  chain(...n) { for (let i = 0; i < n.length - 1; i++) n[i].connect(n[i + 1]); return n[n.length - 1]; }
+  set(param, v, tc = 0.04) { if (!isFinite(v)) v = 0; param.setTargetAtTime(v, this.ctx.currentTime, tc); }
+
+  build() {
+    const P = this.positions;
+    // ---- screw compressors ----
+    for (const id of ['A', 'B']) {
+      const out = this.panner(P['comp' + id]);
+      const n = this.noise(true), nw = this.noise(false);
+      const s = {
+        low: this.gain(), mid: this.gain(), hi: this.gain(), pulse: this.gain(), pulse2: this.gain(), hum: this.gain(), hum3: this.gain(), rot: this.gain(), am: this.gain(1),
+      };
+      this.chain(n, this.filt('bandpass', 380, 0.6), s.low, s.am);
+      this.chain(nw, this.filt('bandpass', 1450, 0.9), s.mid, s.am);
+      this.chain(nw, this.filt('highpass', 3600, 0.5), s.hi, s.am);
+      s.am.connect(out);
+      s.lobe = this.osc('sawtooth', 236); this.chain(s.lobe, this.filt('lowpass', 1600, 0.9), s.pulse, out);
+      s.lobe2 = this.osc('triangle', 472); this.chain(s.lobe2, s.pulse2, out);
+      s.h120 = this.osc('sine', 120); this.chain(s.h120, s.hum, out);
+      s.h360 = this.osc('sine', 360); this.chain(s.h360, s.hum3, out);
+      s.r = this.osc('sine', 59); this.chain(s.r, s.rot, out);
+      // gas pulsation amplitude modulation (flutter at lobe frequency / 4)
+      s.lfo = this.osc('sine', 14); s.lfoG = this.gain(0); s.lfo.connect(s.lfoG); s.lfoG.connect(s.am.gain);
+      this.src['comp' + id] = s;
+    }
+    // ---- primary pump (across the line) ----
+    {
+      const out = this.panner(P.P1);
+      const s = { flow: this.gain(), vane: this.gain(), hum: this.gain(), fan: this.gain() };
+      this.chain(this.noise(true), this.filt('lowpass', 650, 0.7), s.flow, out);
+      s.v = this.osc('triangle', 175); this.chain(s.v, s.vane, out);
+      s.h = this.osc('sine', 120); this.chain(s.h, s.hum, out);
+      this.chain(this.noise(false), this.filt('bandpass', 1100, 0.8), s.fan, out);
+      this.src.P1 = s;
+    }
+    // ---- secondary pump on VFD (motor magnetic whine tracks output frequency) ----
+    {
+      const out = this.panner(P.P2);
+      const s = { flow: this.gain(), vane: this.gain(), fan: this.gain(), mag2: this.gain(), mag12: this.gain(), mag24: this.gain(), carrier: this.gain(), carAM: this.gain(0.5) };
+      this.chain(this.noise(true), this.filt('lowpass', 700, 0.7), s.flow, out);
+      s.v = this.osc('triangle', 175); this.chain(s.v, s.vane, out);
+      this.chain(this.noise(false), this.filt('bandpass', 1100, 0.8), s.fan, out);
+      s.m2 = this.osc('sine', 120); this.chain(s.m2, s.mag2, out);
+      s.m12 = this.osc('sawtooth', 600); this.chain(s.m12, this.filt('bandpass', 900, 1.2), s.mag12, out);
+      s.m24 = this.osc('sine', 1200); this.chain(s.m24, s.mag24, out);
+      // PWM carrier tone radiated by the motor, amplitude-modulated at 2×f_out
+      s.car = this.osc('sine', 3000); s.car.connect(s.carAM); s.carAM.connect(s.carrier); s.carrier.connect(out);
+      s.carLfo = this.osc('sine', 120); s.carLfoG = this.gain(0.45); s.carLfo.connect(s.carLfoG); s.carLfoG.connect(s.carAM.gain);
+      this.src.P2 = s;
+      // the drive itself: heatsink fan + inductor whine
+      const vout = this.panner(P.VFD);
+      const d = { fan: this.gain(), whine: this.gain() };
+      this.chain(this.noise(false), this.filt('bandpass', 2400, 0.7), d.fan, vout);
+      d.w = this.osc('sine', 3000); this.chain(d.w, d.whine, vout);
+      this.src.VFD = d;
+    }
+    // ---- oil pumps ----
+    for (const id of ['A', 'B']) {
+      const out = this.panner(P['oilpump' + id]);
+      const s = { g: this.gain() };
+      s.o = this.osc('sawtooth', 58); this.chain(s.o, this.filt('lowpass', 900, 1), s.g, out);
+      s.w = this.osc('sine', 870); s.wg = this.gain(); this.chain(s.w, s.wg, out);
+      this.src['oil' + id] = s;
+    }
+    // ---- AHU, exhaust fan, transformer, room tone ----
+    {
+      const out = this.panner(P.AHU);
+      const s = { rumble: this.gain(), air: this.gain(), bpf: this.gain() };
+      this.chain(this.noise(true), this.filt('lowpass', 260, 0.8), s.rumble, out);
+      this.chain(this.noise(false), this.filt('bandpass', 700, 0.5), s.air, out);
+      s.b = this.osc('sine', 46); this.chain(s.b, s.bpf, out);
+      this.src.AHU = s;
+      const eo = this.panner(P.EF); const e = { g: this.gain() }; this.chain(this.noise(true), this.filt('bandpass', 420, 0.6), e.g, eo); this.src.EF = e;
+      const to = this.panner(P.T1); const t = { g: this.gain(), g2: this.gain() };
+      t.o = this.osc('sine', 120); this.chain(t.o, t.g, to); t.o2 = this.osc('sine', 240); this.chain(t.o2, t.g2, to); this.src.T1 = t;
+      const room = this.gain(0.02); this.chain(this.noise(true), this.filt('lowpass', 180, 0.5), room, this.master); this.src.room = room;
+      const buzz = this.gain(0); this.chain(this.osc('sawtooth', 120), this.filt('bandpass', 240, 2), buzz, this.master); this.src.buzz = buzz;
+      // alarm beeper at control box
+      const ao = this.panner(P.CB); const a = { g: this.gain() }; a.o = this.osc('square', 2900); this.chain(a.o, this.filt('lowpass', 5000), a.g, ao); this.src.alarm = a;
+    }
+  }
+
+  update(plant, cam, ui) {
+    if (!this.ready) return;
+    const ctx = this.ctx, L = ctx.listener;
+    const p = cam.position, f = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion), u = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
+    if (L.positionX) { const t = ctx.currentTime; L.positionX.setTargetAtTime(p.x, t, 0.02); L.positionY.setTargetAtTime(p.y, t, 0.02); L.positionZ.setTargetAtTime(p.z, t, 0.02); L.forwardX.setTargetAtTime(f.x, t, 0.02); L.forwardY.setTargetAtTime(f.y, t, 0.02); L.forwardZ.setTargetAtTime(f.z, t, 0.02); L.upX.setTargetAtTime(u.x, t, 0.02); L.upY.setTargetAtTime(u.y, t, 0.02); L.upZ.setTargetAtTime(u.z, t, 0.02); }
+    else { L.setPosition(p.x, p.y, p.z); L.setOrientation(f.x, f.y, f.z, u.x, u.y, u.z); }
+    const V = plant.elec.V;
+    // compressors
+    for (const c of plant.circuits) {
+      const s = this.src['comp' + c.id], n = c.noise;
+      const wr = c.motor.w / c.w0;
+      this.set(s.low.gain, 0.55 * n.roar);
+      this.set(s.mid.gain, 0.30 * n.roar + 0.03 * n.mesh);
+      this.set(s.hi.gain, 0.07 * n.roar + 0.02 * n.mesh);
+      this.set(s.pulse.gain, 0.10 * n.pulse);
+      this.set(s.pulse2.gain, 0.05 * n.pulse + 0.02 * n.mesh);
+      this.set(s.hum.gain, 0.10 * n.hum);
+      this.set(s.hum3.gain, 0.035 * n.hum);
+      this.set(s.rot.gain, 0.08 * wr * wr);
+      this.set(s.lfoG.gain, 0.18 * Math.min(1, n.pulse));
+      const lob = Math.max(n.lobeHz || 1, 1);
+      this.set(s.lobe.frequency, lob, 0.02); this.set(s.lobe2.frequency, lob * 2, 0.02);
+      this.set(s.r.frequency, Math.max(n.rotHz || 1, 1), 0.02);
+      this.set(s.lfo.frequency, Math.max(lob / 17, 0.5), 0.05);
+      this.set(s.h120.frequency, 120 * Math.max(V, 0.5)); // magnetostriction tracks supply
+    }
+    // primary pump
+    {
+      const m = plant.P1.motor, n = m.w / (m.wSync * 0.975), s = this.src.P1;
+      this.set(s.flow.gain, 0.10 * n * n);
+      this.set(s.vane.gain, 0.025 * n * n); this.set(s.v.frequency, Math.max(6 * m.rpm / 60, 1));
+      this.set(s.hum.gain, m.conn === 'delta' ? 0.05 * V : 0);
+      this.set(s.fan.gain, 0.05 * n * n);
+    }
+    // secondary pump + VFD
+    {
+      const m = plant.P2.motor, hz = plant.P2.hz, n = m.w / (m.wSync * 0.98), s = this.src.P2, d = this.src.VFD;
+      const load = Math.min(1, m.I / m.ratedA);
+      this.set(s.flow.gain, 0.10 * n * n);
+      this.set(s.vane.gain, 0.022 * n * n); this.set(s.v.frequency, Math.max(6 * m.rpm / 60, 1));
+      this.set(s.fan.gain, 0.05 * n * n);
+      const on = hz > 0.3 ? 1 : 0;
+      this.set(s.mag2.gain, on * (0.03 + 0.03 * load)); this.set(s.m2.frequency, Math.max(2 * hz, 1));
+      this.set(s.mag12.gain, on * (0.035 + 0.02 * (1 - hz / 60))); this.set(s.m12.frequency, Math.max(12 * hz, 1));
+      this.set(s.mag24.gain, on * 0.018); this.set(s.m24.frequency, Math.max(24 * hz, 1));
+      this.set(s.carrier.gain, on * 0.022); this.set(s.carLfo.frequency, Math.max(2 * hz, 1));
+      this.set(d.fan.gain, plant.vfd.running || hz > 0 ? 0.035 : 0);
+      this.set(d.whine.gain, on * 0.008);
+    }
+    for (const c of plant.circuits) { const s = this.src['oil' + c.id]; this.set(s.g.gain, c.oilPump && V > 0.5 ? 0.04 : 0); this.set(s.wg.gain, c.oilPump && V > 0.5 ? 0.012 : 0); }
+    { const s = this.src.AHU, a = plant.ahuSpd; this.set(s.rumble.gain, 0.16 * a * a); this.set(s.air.gain, 0.06 * a * a); this.set(s.bpf.gain, 0.03 * a); this.set(s.b.frequency, Math.max(46 * a, 1)); }
+    this.set(this.src.EF.g.gain, ui.exhaustSpd * 0.05);
+    this.set(this.src.T1.g.gain, plant.mainBreaker ? 0.03 + plant.elec.I / 1500 * 0.03 : 0); this.set(this.src.T1.g2.gain, plant.mainBreaker ? 0.012 : 0);
+    this.set(this.src.buzz.gain, ui.lightsOn && plant.mainBreaker ? 0.004 : 0);
+    const alarmOn = plant.ctl.alarms.length > 0 && plant.ctlPowered && (Math.floor(ctx.currentTime * 2) % 2 === 0);
+    this.set(this.src.alarm.g.gain, alarmOn ? 0.012 : 0, 0.005);
+  }
+
+  // ---------- one-shot mechanical sounds ----------
+  oneShot(type, pos, gain = 1) {
+    if (!this.ready) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const out = this.ctx.createPanner(); out.panningModel = 'HRTF'; out.distanceModel = 'inverse'; out.refDistance = 1.2; out.rolloffFactor = 1.1;
+    out.positionX.value = pos.x; out.positionY.value = pos.y; out.positionZ.value = pos.z; out.connect(this.master);
+    const burst = (dur, filterType, f, q, amp, delay = 0) => {
+      const s = ctx.createBufferSource(); s.buffer = this.white; const fl = this.filt(filterType, f, q); const g = this.gain(0);
+      s.connect(fl); fl.connect(g); g.connect(out);
+      g.gain.setValueAtTime(0, t + delay); g.gain.linearRampToValueAtTime(amp, t + delay + 0.002); g.gain.exponentialRampToValueAtTime(0.0001, t + delay + dur);
+      s.start(t + delay, Math.random()); s.stop(t + delay + dur + 0.05);
+    };
+    const tone = (f0, f1, dur, amp, type = 'sine', delay = 0) => {
+      const o = ctx.createOscillator(); o.type = type; const g = this.gain(0); o.connect(g); g.connect(out);
+      o.frequency.setValueAtTime(f0, t + delay); o.frequency.exponentialRampToValueAtTime(f1, t + delay + dur);
+      g.gain.setValueAtTime(0, t + delay); g.gain.linearRampToValueAtTime(amp, t + delay + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + delay + dur);
+      o.start(t + delay); o.stop(t + delay + dur + 0.05);
+    };
+    switch (type) {
+      case 'contactor':   // big 3-pole contactor slam
+        burst(0.09, 'lowpass', 2600, 0.7, 0.55 * gain); tone(140, 70, 0.12, 0.35 * gain); burst(0.03, 'highpass', 3000, 0.7, 0.2 * gain, 0.012); break;
+      case 'thud':        // across-the-line pump start: contactor + shaft torque kick through the base
+        burst(0.08, 'lowpass', 2200, 0.7, 0.4 * gain); tone(65, 32, 0.38, 0.75 * gain); tone(110, 60, 0.18, 0.25 * gain); break;
+      case 'solenoid':    // solenoid valve / loader coil click
+        burst(0.014, 'highpass', 1500, 0.7, 0.35 * gain); tone(2200, 1700, 0.04, 0.08 * gain, 'triangle'); burst(0.05, 'bandpass', 600, 2, 0.08 * gain, 0.004); break;
+      case 'relay':
+        burst(0.008, 'highpass', 2500, 0.7, 0.18 * gain); break;
+      case 'switch':
+        burst(0.02, 'bandpass', 1800, 1.2, 0.3 * gain); tone(900, 600, 0.03, 0.06 * gain, 'triangle'); break;
+      case 'breaker':
+        burst(0.06, 'lowpass', 3000, 0.6, 0.6 * gain); tone(220, 90, 0.1, 0.3 * gain); break;
+      case 'key':
+        burst(0.01, 'bandpass', 2500, 1, 0.15 * gain); break;
+      case 'alarm': break;
+    }
+  }
+}
+
+// =====================================================================
+//  MAIN — wiring sim ↔ scene ↔ audio, physical controls, screens, loop
+// =====================================================================
+const plant = new Plant();
+const audio = new PlantAudio();
+const W = (x, y, z) => new THREE.Vector3(x, y, z);
+audio.positions = {
+  compA: W(CH.x - 1.05, 1.95, CH.z), compB: W(CH.x + 1.05, 1.95, CH.z),
+  P1: W(-7.3, 0.6, CH.z - 0.2), P2: W(-7.3, 0.6, CH.z + 4.4), VFD: W(-11.8, 1.6, CH.z + 4.4),
+  oilpumpA: W(CH.x - 1.25, 0.35, CH.z + 0.55), oilpumpB: W(CH.x + 1.25, 0.35, CH.z + 0.55),
+  AHU: W(7.6, 1.3, 5.5), EF: W(11.9, 4.4, 4.5), T1: W(11.2, 0.7, -1.6), CB: W(CH.x + 2.9, 1.4, CH.z),
+};
+const evPos = (src) => {
+  const P = audio.positions;
+  if (src.startsWith('compS') || src.startsWith('comp')) return P.CB;          // contactors live in the control box
+  if (src.startsWith('loader') || src.startsWith('mc') || src.startsWith('oil') && !src.startsWith('oilpump')) return src.endsWith('A') ? P.compA : P.compB;
+  if (src.startsWith('oilpump')) return P['oilpump' + src.slice(-1)];
+  if (src.startsWith('llsv')) return W(CH.x + (src.endsWith('A') ? -1.25 : 1.25), 1.45, CH.z - 1.05);
+  if (src === 'P1') return W(-11.8, 1.45, CH.z - 0.2);
+  if (src === 'bas') return W(-3.4, 1.55, 7.85);
+  if (src === 'flowswitch') return W(CH.x - 2.4, 1.1, CH.z - 0.2);
+  return P.CB;
+};
+
+const ui = {
+  speed: 1, lightsOn: true, exhaustSpd: 0, navPage: -1, navRot: 0, navT: 0, navExpand: false,
+  basPage: 'PLANT', basButtons: [], trend: [], trendT: 0, screenT: 0, fps: 0,
+};
+
+// ---------------- physical control handlers ----------------
+const setKnob = () => {
+  const s = plant.ctl.switch;
+  anim.eorKnob.rotation.z = s === 'ENABLE' ? 0.8 : s === 'OFF' ? 0 : -0.8;
+  anim.estopTog.rotation.x = plant.ctl.estop ? -0.5 : 0.5;
+  anim.hoa1.rotation.z = plant.P1.hoa === 'HAND' ? 0.8 : plant.P1.hoa === 'OFF' ? 0 : -0.8;
+  anim.mainBreaker.rotation.x = plant.mainBreaker ? -0.5 : 0.5;
+  anim.condFanBreaker.rotation.z = plant.condFanBreaker ? 0 : 0;
+  anim.condFanBreaker.children[0].position.y = plant.condFanBreaker ? 0.06 : -0.06;
+  anim.chillerDisc.children[0].position.y = plant.chillerDisc ? 0.1 : -0.1;
+  anim.mainBreaker.children[0].position.y = plant.mainBreaker ? 0.08 : -0.08;
+  anim.lightSwitch.position.y = ui.lightsOn ? 1.27 : 1.23;
+  for (const [k, b] of Object.entries(anim.vfdKeys)) b.material.emissive = new THREE.Color(plant.P2.hoa === k ? 0x333333 : 0x000000);
+};
+window.addEventListener('ctl', (e) => {
+  const d = e.detail, c = plant.ctl;
+  const sfx = (t, p, g = 1) => audio.oneShot(t, p, g);
+  const camP = camera.position;
+  switch (d.k) {
+    case 'eor': c.switch = c.switch === 'ENABLE' ? 'OFF' : c.switch === 'OFF' ? 'REMOTE' : 'ENABLE'; sfx('switch', audio.positions.CB); break;
+    case 'estop': c.estop = !c.estop; sfx('switch', audio.positions.CB); break;
+    case 'nav': navKey(d.v); sfx('key', audio.positions.CB); break;
+    case 'hoa1': plant.P1.hoa = plant.P1.hoa === 'AUTO' ? 'OFF' : plant.P1.hoa === 'OFF' ? 'HAND' : 'AUTO'; sfx('switch', W(-11.8, 1.45, CH.z - 0.2)); break;
+    case 'vfdKey': plant.P2.hoa = d.v; sfx('key', audio.positions.VFD); break;
+    case 'isoValve': plant.isoValveCmd = plant.isoValveCmd > 0.5 ? 0 : 1; sfx('switch', W(CH.x - 3.07, 1.3, CH.z - 0.2), 0.6); break;
+    case 'ballValve': { const k = plant[d.id]; k.liquidValveOpen = k.liquidValveOpen > 0.5 ? 0 : 1; sfx('switch', camP, 0.4); break; }
+    case 'mainBreaker': plant.mainBreaker = !plant.mainBreaker; sfx('breaker', W(11.0, 1.35, -6.2)); break;
+    case 'condFanBreaker': plant.condFanBreaker = !plant.condFanBreaker; sfx('breaker', W(11.8, 1.55, 2.1), 0.6); break;
+    case 'chillerDisc': plant.chillerDisc = !plant.chillerDisc; sfx('breaker', W(-0.85, 1.6, -7.7)); break;
+    case 'lights': ui.lightsOn = !ui.lightsOn; sfx('switch', W(1.3, 1.25, 7.95), 0.5); break;
+  }
+  setKnob();
+});
+
+// ---------------- unit display module (4 × 20 LCD) ----------------
+const f1 = v => (Math.round(v * 10) / 10).toFixed(1);
+const pad = (a, b, n = 20) => { a = String(a); b = String(b); return (a + ' '.repeat(Math.max(1, n - a.length - b.length)) + b).slice(0, n); };
+const unitModeText = () => {
+  const c = plant.ctl;
+  if (!plant.ctlPowered) return '';
+  if (plant.ctlBoot > 0) return 'INITIALIZING...';
+  if (!c.estop) return 'EMERGENCY STOP';
+  const on = plant.unitEnabled();
+  if (c.mode === 'PUMPDOWN') return 'PUMPDOWN';
+  if (c.alarms.length && !on) return 'ALARM';
+  return on ? 'LOCAL ON' : 'LOCAL OFF';
+};
+const navPages = () => {
+  const p = plant, A = p.A, B = p.B, c = p.ctl;
+  const cir = k => [
+    [`CIRCUIT ${k.id}`, k.compOn ? (k.state === 'PUMPDOWN' ? 'PMPDN' : 'RUN') : 'OFF'],
+    [`DP.${k.id} DISCH`, `${f1(kPa2psig(k.Pcond))} PSIG`],
+    [`SP.${k.id} SUCT`, `${f1(kPa2psig(k.Psuc))} PSIG`],
+    [`SCT.${k.id}`, `${f1(C2F(k.Tcond))} °F`],
+  ];
+  const cir2 = k => [
+    [`SST.${k.id}`, `${f1(C2F(k.Tsuc))} °F`],
+    [`DGT.${k.id}1 DIS GAS`, `${f1(C2F(k.Tdgt))} °F`],
+    [`DSH.${k.id} DIS SH`, `${f1(k.DSHmeas * 1.8)} ^F`],
+    [`EXV.${k.id}`, `${f1(k.exv * 100)} %`],
+  ];
+  const cir3 = k => [
+    [`CC.${k.id}1 COMP`, k.compOn ? 'ON' : 'OFF'],
+    [`LD.${k.id}1 / LD.${k.id}2`, `${k.L1 ? 'ON' : 'OFF'}/${k.L2 ? 'ON' : 'OFF'}`],
+    [`OP.${k.id} OIL PUMP`, k.oilPump ? 'ON' : 'OFF'],
+    [`MTR.${k.id}1 MOTOR`, `${f1(C2F(k.Tmotor))} °F`],
+  ];
+  const al = c.alarms.length ? c.alarms.slice(0, 3).map(a => [a.code, a.text.slice(0, 14)]) : [['NO ACTIVE ALARMS', '']];
+  while (al.length < 3) al.push(['', '']);
+  return [
+    [['RUN STATUS', unitModeText()], ['EWT', `${f1(C2F(p.ewtSensor))} °F`], ['LWT', `${f1(C2F(p.lwtSensor))} °F`], ['SETP', `${f1(C2F(c.setpoint))} °F`]],
+    [['CAP TOTAL', `${c.capacityPct} %`], ['STGE', `${c.stage}`], ['SMZ LOAD/UNLD', `${Math.round(c.smz)} %`], ['LEAD CIRCUIT', c.lead]],
+    cir(A), cir2(A), cir3(A), cir(B), cir2(B), cir3(B),
+    [['HRS.A / HRS.B', `${Math.round(A.hours)}/${Math.round(B.hours)}`], ['ST.A / ST.B', `${A.starts}/${B.starts}`], ['OAT', `${f1(p.oatF)} °F`], ['CHWS FLOW SW', p.flowSwitch ? 'CLOSED' : 'OPEN']],
+    [['ALARMS', `${c.alarms.length} ACTIVE`], ...al],
+    [['ALARM RESET', ''], ['RCRN: PRESS ENTER', ''], ['TO RESET ALL', ''], ['CURRENT ALARMS', '']],
+  ];
+};
+function navKey(k) {
+  const n = navPages().length;
+  if (k === 'ESC') { ui.navPage = -1; ui.navExpand = false; }
+  if (k === 'DOWN') ui.navPage = (ui.navPage + 1 + n) % n;
+  if (k === 'UP') ui.navPage = ui.navPage <= 0 ? n - 1 : ui.navPage - 1;
+  if (k === 'ENTER' && ui.navPage === n - 1) { plant.resetAlarms(); ui.navFlash = 2; }
+  ui.navT = 0;
+}
+function drawNav() {
+  const S = anim.screens.nav, g = S.g;
+  const powered = plant.ctlPowered;
+  g.fillStyle = powered ? '#8fbf3a' : '#2b3a19'; g.fillRect(0, 0, S.w, S.h);
+  if (powered) {
+    g.fillStyle = 'rgba(0,0,0,0.06)'; for (let i = 0; i < 20; i++) g.fillRect(8 + i * 19.2, 6, 17.5, 148);
+    g.fillStyle = '#16200a'; g.font = 'bold 30px "Courier New", monospace'; g.textBaseline = 'top';
+    let lines;
+    if (plant.ctlBoot > 0) lines = ['', '  INITIALIZING', `  WAIT ${Math.ceil(plant.ctlBoot)} s`, ''];
+    else if (ui.navFlash > 0) lines = ['ALARMS RESET', '', '', ''];
+    else if (ui.navPage < 0) {
+      // default rotating display (VIEW sub-mode)
+      const t = new Date(0); t.setUTCSeconds(plant.clock);
+      const hh = String(t.getUTCHours()).padStart(2, '0'), mm = String(t.getUTCMinutes()).padStart(2, '0');
+      const items = [['EWT', `${f1(C2F(plant.ewtSensor))} °F`], ['LWT', `${f1(C2F(plant.lwtSensor))} °F`], ['SETP', `${f1(C2F(plant.ctl.setpoint))} °F`], ['CAP', `${plant.ctl.capacityPct} %`], ['STGE', `${plant.ctl.stage}`], ['ALRM', `${plant.ctl.alarms.length}`]];
+      const k = Math.floor(ui.navRot) % 2;
+      lines = [pad(unitModeText(), `${hh}:${mm}`), ...items.slice(k * 3, k * 3 + 3).map(([a, b]) => pad(a, b))];
+    } else lines = navPages()[ui.navPage].map(([a, b]) => pad(a, b));
+    lines.forEach((ln, i) => g.fillText(ln.padEnd(20).slice(0, 20), 10, 8 + i * 37));
+  }
+  S.tex.needsUpdate = true;
+}
+
+// ---------------- BAS touchscreen ----------------
+function drawBAS() {
+  const S = anim.screens.bas, g = S.g, Wd = S.w, Ht = S.h;
+  ui.basButtons = [];
+  if (!plant.basPowered || plant.basBoot > 0) {
+    g.fillStyle = '#000'; g.fillRect(0, 0, Wd, Ht);
+    if (plant.basPowered) { g.fillStyle = '#7a8a99'; g.font = '32px Arial'; g.textAlign = 'center'; g.fillText(`Controller booting… ${Math.ceil(plant.basBoot)}`, Wd / 2, Ht / 2); g.textAlign = 'left'; }
+    S.tex.needsUpdate = true; return;
+  }
+  const C = { bg: '#0f1720', panel: '#18232f', line: '#2c3b4b', text: '#dfe7ef', mute: '#8597a8', blue: '#3f8fe0', green: '#3bb273', red: '#e5484d', amber: '#e8a33d', cyan: '#4fc3d9' };
+  g.fillStyle = C.bg; g.fillRect(0, 0, Wd, Ht);
+  const btn = (x, y, w, h, label, on, act, col = C.blue) => {
+    g.fillStyle = on ? col : C.panel; g.strokeStyle = on ? col : C.line; g.lineWidth = 2;
+    g.beginPath(); g.roundRect(x, y, w, h, 10); g.fill(); g.stroke();
+    g.fillStyle = on ? '#fff' : C.text; g.font = 'bold 24px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(label, x + w / 2, y + h / 2 + 1);
+    g.textAlign = 'left'; ui.basButtons.push({ x, y, w, h, act });
+  };
+  const txt = (s, x, y, size = 22, col = C.text, bold = false, align = 'left') => { g.fillStyle = col; g.font = `${bold ? 'bold ' : ''}${size}px Arial`; g.textAlign = align; g.textBaseline = 'alphabetic'; g.fillText(s, x, y); g.textAlign = 'left'; };
+  // header
+  g.fillStyle = '#0a1016'; g.fillRect(0, 0, Wd, 64);
+  txt('CHILLED WATER PLANT · CH-1', 24, 42, 28, C.text, true);
+  const t = new Date(0); t.setUTCSeconds(plant.clock);
+  txt(`${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')}:${String(t.getUTCSeconds()).padStart(2, '0')}`, Wd - 24, 42, 28, C.cyan, true, 'right');
+  txt(plant.bas.occ ? 'OCCUPIED' : 'UNOCCUPIED', Wd - 180, 42, 22, plant.bas.occ ? C.green : C.amber, true, 'right');
+  // tabs
+  ['PLANT', 'ROOF', 'TRENDS', 'ALARMS'].forEach((p, i) => btn(24 + i * 175, 76, 165, 44, p === 'ROOF' ? 'CONDENSER' : p, ui.basPage === p, () => { ui.basPage = p; }));
+  const A = plant.A, B = plant.B;
+  if (ui.basPage === 'PLANT') {
+    // schematic
+    const sx = 24, sy = 136;
+    g.fillStyle = C.panel; g.beginPath(); g.roundRect(sx, sy, 800, 500, 12); g.fill();
+    const pipeLine = (pts, col, w = 8) => { g.strokeStyle = col; g.lineWidth = w; g.lineJoin = 'round'; g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); };
+    const flowCol = (f) => f > 0.5 ? C.blue : '#334455';
+    pipeLine([[90, 250], [300, 250]], flowCol(plant.Fp)); pipeLine([[300, 250], [300, 210], [470, 210]], flowCol(plant.Fp));
+    pipeLine([[470, 300], [300, 300], [300, 420], [90, 420]], flowCol(plant.Fp));
+    pipeLine([[640, 210], [760, 210]], flowCol(plant.Fs)); pipeLine([[640, 420], [760, 420]], flowCol(plant.Fs));
+    pipeLine([[640, 210], [640, 420]], C.mute, 5);
+    // chiller
+    g.fillStyle = '#22303e'; g.strokeStyle = C.line; g.beginPath(); g.roundRect(470, 180, 170, 150, 10); g.fill(); g.stroke();
+    txt('CH-1', 555, 214, 24, C.text, true, 'center');
+    txt(`CKT A ${A.compOn ? Math.round(A.sv * 100) + '%' : 'OFF'}`, 555, 252, 20, A.compOn ? C.green : C.mute, true, 'center');
+    txt(`CKT B ${B.compOn ? Math.round(B.sv * 100) + '%' : 'OFF'}`, 555, 282, 20, B.compOn ? C.green : C.mute, true, 'center');
+    txt(unitModeText() || 'NO POWER', 555, 314, 17, C.cyan, false, 'center');
+    // pumps
+    const pumpIcon = (x, y, on, name, sub) => { g.fillStyle = on ? C.green : '#3a4654'; g.beginPath(); g.arc(x, y, 30, 0, 7); g.fill(); g.fillStyle = '#fff'; g.beginPath(); g.moveTo(x - 10, y - 14); g.lineTo(x + 16, y); g.lineTo(x - 10, y + 14); g.fill(); txt(name, x, y + 56, 19, C.text, true, 'center'); txt(sub, x, y + 80, 18, C.mute, false, 'center'); };
+    pumpIcon(190, 420, plant.P1.contactor && plant.P1.motor.w > 50, 'CHWP-1', `${plant.P1.hoa} · ${Math.round(plant.Fp / GPM)} GPM`);
+    pumpIcon(710, 420, plant.P2.hz > 1, 'CHWP-2', `${plant.P2.hoa} · ${f1(plant.P2.hz)} Hz`);
+    txt('DECOUPLER', 650, 320, 16, C.mute, false); txt(`${Math.round((plant.Fp - plant.Fs) / GPM)} GPM`, 650, 342, 16, C.mute);
+    txt(`CHWS ${f1(C2F(plant.lwtSensor))}°F`, 330, 200, 22, C.cyan, true);
+    txt(`CHWR ${f1(C2F(plant.ewtSensor))}°F`, 330, 330, 22, C.amber, true);
+    txt('TO BLDG', 770, 216, 18, C.mute); txt('FROM BLDG', 770, 426, 18, C.mute);
+    txt(`BLDG SUPPLY ${f1(C2F(plant.Tsup))}°F · RETURN ${f1(C2F(plant.Tret))}°F`, 50, 560, 21, C.text);
+    txt(`SPACE ${f1(C2F(plant.Tzone))}°F · AHU VALVES ${Math.round(plant.valve * 100)}% · LOAD ${Math.round(plant.Qcoil / 3.517)} TONS`, 50, 592, 21, C.text);
+    txt(`OUTDOOR AIR ${f1(plant.oatF)}°F${plant.oatManual != null ? ' (OVERRIDE)' : ''}`, 50, 624, 21, plant.oatManual != null ? C.amber : C.text);
+    // right column controls
+    const rx = 846;
+    g.fillStyle = C.panel; g.beginPath(); g.roundRect(rx, 136, 410, 650, 12); g.fill();
+    txt('OCCUPANCY COMMAND', rx + 20, 172, 20, C.mute, true);
+    ['AUTO', 'OCC', 'UNOCC'].forEach((m, i) => btn(rx + 20 + i * 128, 184, 118, 54, m, plant.bas.mode === m, () => { plant.bas.mode = m; }));
+    txt('Schedule: occupied 07:00–16:30', rx + 20, 266, 18, C.mute);
+    txt('CHW SETPOINT', rx + 20, 312, 20, C.mute, true);
+    btn(rx + 20, 324, 70, 54, '−', false, () => { plant.ctl.setpoint = clamp(plant.ctl.setpoint - 1 / 1.8, F2C(40), F2C(55)); });
+    txt(`${f1(C2F(plant.ctl.setpoint))}°F`, rx + 205, 362, 34, C.text, true, 'center');
+    btn(rx + 320, 324, 70, 54, '+', false, () => { plant.ctl.setpoint = clamp(plant.ctl.setpoint + 1 / 1.8, F2C(40), F2C(55)); });
+    txt('OUTDOOR AIR (WEATHER)', rx + 20, 420, 20, C.mute, true);
+    btn(rx + 20, 432, 70, 54, '−', false, () => { plant.oatManual = Math.round((plant.oatManual ?? plant.oatF) - 5); });
+    btn(rx + 100, 432, 210, 54, plant.oatManual == null ? 'LIVE WEATHER' : `${plant.oatManual}°F  (CLEAR)`, plant.oatManual == null, () => { plant.oatManual = null; });
+    btn(rx + 320, 432, 70, 54, '+', false, () => { plant.oatManual = Math.round((plant.oatManual ?? plant.oatF) + 5); });
+    txt('SIMULATION SPEED', rx + 20, 528, 20, C.mute, true);
+    [1, 2, 5, 10, 30].forEach((s, i) => btn(rx + 20 + i * 76, 540, 68, 54, `${s}×`, ui.speed === s, () => { ui.speed = s; }));
+    txt('CHILLER ENABLE (REMOTE CONTACT)', rx + 20, 636, 18, C.mute, true);
+    txt(plant.ctl.remote ? 'CLOSED — chiller enabled' : 'OPEN — chiller disabled', rx + 20, 664, 20, plant.ctl.remote ? C.green : C.amber, true);
+    txt(`Sequence: ${plant.bas.seq.replace('_', ' ')}`, rx + 20, 700, 20, C.text);
+    txt(`Plant kW: ${Math.round(plant.A.motor.Pelec + plant.B.motor.Pelec + plant.P1.motor.Pelec + plant.vfd.kW)}`, rx + 20, 734, 20, C.text);
+    txt(`kW/ton: ${plant.circuits.some(k => k.compOn) ? (((plant.A.motor.Pelec + plant.B.motor.Pelec) / Math.max(1, (plant.A.Qevap + plant.B.Qevap) / 3.517)).toFixed(2)) : '—'}`, rx + 220, 734, 20, C.text);
+  } else if (ui.basPage === 'ROOF') {
+    g.fillStyle = C.panel; g.beginPath(); g.roundRect(24, 136, 1232, 650, 12); g.fill();
+    txt('CU-1 AIR-COOLED CONDENSER (ROOF) — 14 FANS, 2 INDEPENDENT CIRCUITS', 48, 176, 22, C.text, true);
+    txt(`Ambient ${f1(plant.oatF)}°F · Fan disconnect ${plant.condFanBreaker ? 'ON' : 'OFF'}`, 48, 206, 20, plant.condFanBreaker ? C.mute : C.red);
+    const now = performance.now() / 1000;
+    [A, B].forEach((k, r) => {
+      const y = 300 + r * 230;
+      txt(`CIRCUIT ${k.id} · SCT ${f1(C2F(k.Tcond))}°F · ${f1(kPa2psig(k.Pcond))} PSIG · REJECT ${Math.round(Math.max(0, k.Qcond))} kW`, 48, y - 70, 20, C.cyan, true);
+      for (let i = 0; i < 7; i++) {
+        const x = 110 + i * 160, spd = k.fanSpd[i];
+        k._fa = (k._fa || []); k._fa[i] = (k._fa[i] || 0) + spd * 0.5;
+        g.strokeStyle = C.line; g.lineWidth = 3; g.beginPath(); g.arc(x, y, 52, 0, 7); g.stroke();
+        g.fillStyle = spd > 0.1 ? C.green : '#3a4654';
+        for (let b = 0; b < 3; b++) { const a = k._fa[i] + b * 2.094; g.beginPath(); g.ellipse(x + Math.cos(a) * 24, y + Math.sin(a) * 24, 24, 10, a, 0, 7); g.fill(); }
+        txt(`FAN ${r * 7 + i + 1}`, x, y + 80, 18, C.text, true, 'center');
+        const why = i < 2 ? 'CMD' : i < 4 ? 'FCPS1' : i < 6 ? 'AMB' : 'FCPS2';
+        txt(why, x, y + 102, 15, C.mute, false, 'center');
+      }
+    });
+  } else if (ui.basPage === 'TRENDS') {
+    g.fillStyle = C.panel; g.beginPath(); g.roundRect(24, 136, 1232, 650, 12); g.fill();
+    const x0 = 90, y0 = 170, w = 1130, h = 520;
+    g.strokeStyle = C.line; g.lineWidth = 1;
+    for (let i = 0; i <= 8; i++) { const y = y0 + i * h / 8; g.beginPath(); g.moveTo(x0, y); g.lineTo(x0 + w, y); g.stroke(); txt(`${80 - i * 5}`, x0 - 12, y + 6, 16, C.mute, false, 'right'); }
+    const tr = ui.trend; const n = tr.length;
+    const span = 3600;
+    const tx = tt => x0 + w - (plant.clock - tt) / span * w;
+    const ty = f => y0 + (80 - f) / 40 * h;
+    const plot = (key, col, sc = v => v) => { g.strokeStyle = col; g.lineWidth = 3; g.beginPath(); let first = true; for (const s of tr) { const x = tx(s.t); if (x < x0) continue; const y = clamp(ty(sc(s[key])), y0, y0 + h); first ? g.moveTo(x, y) : g.lineTo(x, y); first = false; } g.stroke(); };
+    plot('lwt', C.cyan); plot('ewt', C.amber); plot('sp', '#ffffff55'); plot('cap', C.green, v => 40 + v * 0.4); plot('sstA', '#b48cff');
+    const leg = [['CHWS (LWT)', C.cyan], ['CHWR (EWT)', C.amber], ['SETPOINT', '#bbb'], ['CAPACITY % (40–80 scale)', C.green], ['SST CKT A', '#b48cff']];
+    leg.forEach(([l, c], i) => { g.fillStyle = c; g.fillRect(x0 + i * 225, 736, 18, 18); txt(l, x0 + 26 + i * 225, 752, 17, C.text); });
+    txt('°F — last 60 min', x0, y0 - 10, 16, C.mute);
+  } else if (ui.basPage === 'ALARMS') {
+    g.fillStyle = C.panel; g.beginPath(); g.roundRect(24, 136, 1232, 650, 12); g.fill();
+    txt('CH-1 ALARMS (from chiller controller via BACnet)', 48, 176, 22, C.text, true);
+    const list = plant.ctl.history.slice(0, 12);
+    if (!list.length) txt('No alarms recorded.', 48, 220, 20, C.mute);
+    list.forEach((a, i) => { const tt = new Date(0); tt.setUTCSeconds(a.t); const active = plant.ctl.alarms.includes(a); txt(`${tt.toISOString().substr(11, 8)}  ${a.code}  ${a.text}${active ? '  [ACTIVE]' : ''}`, 48, 220 + i * 34, 19, active ? C.red : C.mute, active); });
+    btn(48, 700, 300, 60, 'RESET CHILLER ALARMS', false, () => plant.resetAlarms(), C.red);
+  }
+  S.tex.needsUpdate = true;
+}
+function drawVFD() {
+  const S = anim.screens.vfd, g = S.g, p = plant.P2, v = plant.vfd;
+  g.fillStyle = plant.mainBreaker ? '#0b1a10' : '#050505'; g.fillRect(0, 0, S.w, S.h);
+  if (plant.mainBreaker) {
+    g.fillStyle = '#58f08a'; g.font = 'bold 40px "Courier New", monospace'; g.textBaseline = 'top';
+    g.fillText(`${p.hz.toFixed(1).padStart(5)} Hz`, 10, 8);
+    g.font = 'bold 26px "Courier New", monospace';
+    g.fillText(`${(v.I).toFixed(1).padStart(5)} A ${Math.round(p.motor.rpm).toString().padStart(4)}rpm`, 10, 58);
+    const st = p.hz < 0.2 ? 'STOP' : p.hz < p.hzCmd - 0.5 && p.run ? 'ACCEL' : p.hz > p.hzCmd + 0.5 || !p.run ? 'DECEL' : 'RUN';
+    g.fillText(`${p.hoa.padEnd(5)} ${st}`, 10, 92);
+  }
+  S.tex.needsUpdate = true;
+}
+function drawMeter() {
+  const S = anim.screens.meter, g = S.g, e = plant.elec;
+  g.fillStyle = '#071018'; g.fillRect(0, 0, S.w, S.h);
+  if (plant.mainBreaker) {
+    g.fillStyle = '#7fd4ff'; g.font = 'bold 30px "Courier New", monospace'; g.textBaseline = 'top';
+    g.fillText(`V  ${(480 * e.V).toFixed(0)} V`, 14, 12);
+    g.fillText(`I  ${e.I.toFixed(0).padStart(5)} A`, 14, 56);
+    const kw = Math.sqrt(3) * 480 * e.V * e.I * 0.88 / 1000;
+    g.fillText(`P  ${kw.toFixed(0).padStart(5)} kW`, 14, 100);
+    g.font = '20px "Courier New", monospace'; g.fillStyle = '#4c8fb0';
+    g.fillText(`min V (10s) ${(480 * (ui.minV ?? 1)).toFixed(0)}`, 14, 160);
+  }
+  S.tex.needsUpdate = true;
+}
+function drawLeak() {
+  const S = anim.screens.leak, g = S.g;
+  g.fillStyle = plant.mainBreaker ? '#0d0d0d' : '#050505'; g.fillRect(0, 0, S.w, S.h);
+  if (plant.mainBreaker) {
+    g.fillStyle = '#ff9a3c'; g.font = 'bold 36px "Courier New", monospace'; g.textBaseline = 'top';
+    const ppm = Math.max(0, Math.round(1 + Math.sin(plant.t / 37) * 1.2 + (plant.A.Mtot < 140 || plant.B.Mtot < 140 ? 60 : 0)));
+    g.fillText(`${String(ppm).padStart(4)} PPM`, 14, 14); g.font = 'bold 24px "Courier New", monospace'; g.fillText('R-134a  NORMAL', 14, 72);
+  }
+  S.tex.needsUpdate = true;
+}
+
+// ---------------- camera / walking ----------------
+const player = { pos: new THREE.Vector3(0.0, 1.65, 6.4), yaw: 0.12, pitch: -0.08, eye: 1.65, vel: new THREE.Vector3() };
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault(); audio.start(); });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+const dom = renderer.domElement;
+let drag = null, moved = 0;
+const pointers = new Map();
+dom.addEventListener('pointerdown', e => {
+  dom.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  drag = { x: e.clientX, y: e.clientY }; moved = 0;
+  audio.start();
+});
+dom.addEventListener('pointermove', e => {
+  const prev = pointers.get(e.pointerId);
+  if (prev) {
+    const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+    if (pointers.size >= 2) {
+      // two-finger: walk forward/back + strafe
+      const fwd = -dy * 0.012, side = dx * 0.006;
+      player.pos.x += -Math.sin(player.yaw) * fwd * 0.5 + Math.cos(player.yaw) * side * 0.5;
+      player.pos.z += -Math.cos(player.yaw) * fwd * 0.5 - Math.sin(player.yaw) * side * 0.5;
+    } else {
+      player.yaw += dx * 0.0042; player.pitch = clamp(player.pitch - dy * 0.0042, -1.35, 1.35);
+    }
+    moved += Math.abs(dx) + Math.abs(dy);
+    prev.x = e.clientX; prev.y = e.clientY;
+  } else hover(e);
+});
+const endPointer = e => {
+  const wasTap = pointers.size === 1 && moved < 6;
+  pointers.delete(e.pointerId);
+  if (wasTap) click(e);
+  if (!pointers.size) drag = null;
+};
+dom.addEventListener('pointerup', endPointer);
+dom.addEventListener('pointercancel', e => { pointers.delete(e.pointerId); });
+dom.addEventListener('wheel', e => { e.preventDefault(); const d = -e.deltaY * 0.004; player.pos.x += -Math.sin(player.yaw) * Math.cos(player.pitch) * d; player.pos.z += -Math.cos(player.yaw) * Math.cos(player.pitch) * d; }, { passive: false });
+const ray = new THREE.Raycaster(); const ndc = new THREE.Vector2();
+function pick(e) {
+  const r = dom.getBoundingClientRect();
+  ndc.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
+  ray.setFromCamera(ndc, camera); ray.far = 7;
+  const hits = ray.intersectObjects(clickables, false);
+  if (!hits.length) return null;
+  // make sure the control isn't hidden behind a wall or equipment
+  const all = ray.intersectObjects(scene.children, true);
+  if (all.length && all[0].distance < hits[0].distance - 0.04) return null;
+  return hits[0];
+}
+function hover(e) { const h = pick(e); dom.style.cursor = h ? 'pointer' : 'grab'; }
+function click(e) {
+  const h = pick(e); if (!h) return;
+  const ud = h.object.userData;
+  if (ud.screen === 'bas' && h.uv) {
+    const S = anim.screens.bas; const x = h.uv.x * S.w, y = (1 - h.uv.y) * S.h;
+    for (const b of ui.basButtons) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.act(); audio.oneShot('key', W(-3.4, 1.55, 7.85), 0.7); drawBAS(); break; }
+    return;
+  }
+  if (ud.onClick) ud.onClick();
+}
+function collide(p) {
+  const r = 0.3;
+  p.x = clamp(p.x, ROOM.x0 + r, ROOM.x1 - r); p.z = clamp(p.z, ROOM.z0 + r, ROOM.z1 - r);
+  for (const c of colliders) {
+    if (p.x > c.x0 - r && p.x < c.x1 + r && p.z > c.z0 - r && p.z < c.z1 + r) {
+      const dx0 = p.x - (c.x0 - r), dx1 = (c.x1 + r) - p.x, dz0 = p.z - (c.z0 - r), dz1 = (c.z1 + r) - p.z;
+      const m = Math.min(dx0, dx1, dz0, dz1);
+      if (m === dx0) p.x = c.x0 - r; else if (m === dx1) p.x = c.x1 + r; else if (m === dz0) p.z = c.z0 - r; else p.z = c.z1 + r;
+    }
+  }
+}
+function updatePlayer(dt) {
+  const sp = (keys.ShiftLeft || keys.ShiftRight ? 3.6 : 1.7) * dt;
+  let f = 0, s = 0;
+  if (keys.KeyW || keys.ArrowUp) f += 1; if (keys.KeyS || keys.ArrowDown) f -= 1;
+  if (keys.KeyD) s += 1; if (keys.KeyA) s -= 1;
+  if (keys.ArrowLeft) player.yaw += 1.8 * dt; if (keys.ArrowRight) player.yaw -= 1.8 * dt;
+  player.pos.x += (-Math.sin(player.yaw) * f + Math.cos(player.yaw) * s) * sp;
+  player.pos.z += (-Math.cos(player.yaw) * f - Math.sin(player.yaw) * s) * sp;
+  if (keys.Space) player.eye = Math.min(3.2, player.eye + 1.4 * dt);
+  if (keys.KeyC) player.eye = Math.max(0.6, player.eye - 1.4 * dt);
+  collide(player.pos);
+  camera.position.set(player.pos.x, player.eye, player.pos.z);
+  camera.rotation.order = 'YXZ'; camera.rotation.y = player.yaw; camera.rotation.x = player.pitch;
+}
+window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+// ---------------- visual state update ----------------
+const tmpColor = new THREE.Color();
+function updateVisuals(dt, now) {
+  const p = plant;
+  // lighting: fluorescent output follows bus voltage (dims on motor inrush)
+  const on = ui.lightsOn && p.mainBreaker;
+  const lv = on ? clamp(p.elec.light, 0, 1.3) : 0;
+  lighting.points.forEach((l, i) => { l.intensity = lighting.base[i] * lv; });
+  lighting.lampMat.emissiveIntensity = 2.2 * lv;
+  lighting.hemi.intensity = 0.04 + 0.32 * lv;
+  scene.environmentIntensity = 0.06 + 0.26 * lv;
+  for (const e of lighting.emer) { e.spot.intensity = p.mainBreaker ? 0 : 9; e.mat.emissiveIntensity = p.mainBreaker ? 0 : 3; }
+  // compressor vibration
+  for (const c of p.circuits) {
+    const a = anim.comp[c.id];
+    const amp = 0.0004 * (c.motor.w / c.w0) + 0.0012 * c.noise.roar;
+    a.inner.position.set((Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp, (Math.random() - 0.5) * amp);
+    const op = anim['oilpump' + c.id]; op.position.y = 0.33 + (c.oilPump ? (Math.random() - 0.5) * 0.0012 : 0);
+    // sight glass bubbles: flash gas when sub-cooling is lost, or turbulence on start
+    const sg = anim.sight[c.id];
+    const flow = c.mExv;
+    const bubbly = flow > 0.05 ? clamp(c.flash + (c.SC < 1 ? 0.3 : 0) + (c.state === 'STARTING' || (c.state === 'RUN' && c.tRun < 20) ? 0.5 : 0), 0, 1) : 0;
+    sg.bub.forEach((b, i) => { b.visible = Math.random() < bubbly; if (b.visible) b.position.set((Math.random() - 0.5) * 0.04, (Math.random() - 0.5) * 0.04, 0.034); });
+    sg.win.material.color.set(flow > 0.05 ? 0x6fcf88 : 0x2f9c55);
+    anim['ballValve' + c.id].rotation.y = c.liquidValveOpen > 0.5 ? 0 : Math.PI / 2;
+  }
+  // pumps: couplings (visual speed capped to avoid strobing)
+  const spin = (obj, w) => { obj.rotation.x += Math.min(w, 28) * dt * Math.sign(w); };
+  spin(anim.P1.coup, p.P1.motor.w); spin(anim.P2.coup, p.P2.motor.w);
+  anim.P1.g.position.y = p.P1.motor.w > 10 ? (Math.random() - 0.5) * 0.0006 : 0;
+  anim.P2.g.position.y = p.P2.motor.w > 10 ? (Math.random() - 0.5) * 0.0006 : 0;
+  // AHU fan wheel + exhaust fan
+  anim.ahuWheel.rotation.z += p.ahuSpd * 9 * dt;
+  ui.exhaustSpd = lerp(ui.exhaustSpd, p.mainBreaker && p.bas.occ && p.basPowered ? 1 : 0, 1 - Math.exp(-dt / 4));
+  anim.exhaust.rotation.z += ui.exhaustSpd * 14 * dt;
+  anim.ahuValveActuator.position.y = 1.33 + p.valve * 0.08;
+  // isolation valve handwheel & indicator
+  anim.isoValve.ind.rotation.y = (1 - p.isoValve) * Math.PI / 2;
+  anim.isoValve.wheel.rotation.x = (1 - p.isoValve) * 14;
+  // gauges
+  const n1 = p.P1.motor.w / (p.P1.motor.wSync * 0.975), n2 = p.P2.motor.w / (p.P2.motor.wSync * 0.98);
+  const stat = 28;
+  const h1 = 17.5 * n1 * n1 * 1.42, h2 = 26 * n2 * n2 * 1.42;
+  const evDrop = 6.5 * (p.Fp / (600 * GPM)) ** 2;
+  const G = anim.gauges;
+  G.p1s.set(stat - 1.5 * (p.Fp / (600 * GPM)) ** 2, dt); G.p1d.set(stat + h1 * clamp(0.7 + 0.3 * p.isoValve, 0, 1.1), dt);
+  G.evIn_p.set(stat + h1 * 0.85 * (p.isoValve > 0.05 ? 1 : 0), dt); G.evOut_p.set(stat + h1 * 0.85 * (p.isoValve > 0.05 ? 1 : 0) - evDrop, dt);
+  G.evIn_t.set(C2F(p.Tevap_in ?? p.Tret), dt); G.evOut_t.set(C2F((p.cooler.A.Tw + p.cooler.B.Tw) / 2), dt);
+  G.p2s.set(stat + 1, dt); G.p2d.set(stat + 1 + h2, dt);
+  G.mag.set(0.12 + 0.55 * p.ahuSpd * p.ahuSpd, dt);
+  anim.manifold.lo.set(kPa2psig(p.A.Psuc), dt); anim.manifold.hi.set(kPa2psig(p.A.Pcond), dt);
+  // pilot lights
+  anim.p1RunLight.material.color.set(p.P1.contactor && p.mainBreaker ? 0x3dff5a : 0x1a3a1a);
+  anim.flowLed.material.color.set(!p.mainBreaker ? 0x111100 : p.flowSwitch ? 0xffd21a : p.Fp > 5 ? 0x887a10 : 0x1a8a1a);
+  const blink = Math.floor(now * 2) % 2 === 0;
+  anim.alarmLight.material.color.set(p.ctl.alarms.length && p.ctlPowered && blink ? 0xff2a1a : 0x3a0e0e);
+  anim.powerLight.material.color.set(p.ctlPowered ? 0x3dff5a : 0x113311);
+  // wall clock
+  const h = (p.clock / 3600) % 12, m = (p.clock / 60) % 60, s = p.clock % 60;
+  anim.clock.hh.rotation.z = -h / 12 * Math.PI * 2; anim.clock.mh.rotation.z = -m / 60 * Math.PI * 2; anim.clock.sh.rotation.z = -Math.floor(s) / 60 * Math.PI * 2;
+}
+
+// ---------------- main loop ----------------
+let last = performance.now(), simAcc = 0;
+ui.minV = 1; ui.minVT = 0;
+mergeStatic();
+setKnob();
+drawBAS(); drawNav(); drawVFD(); drawMeter(); drawLeak();
+function frame() {
+  const now = performance.now();
+  let dt = Math.min((now - last) / 1000, 0.1); last = now;
+  // simulation: fixed 10 ms steps
+  simAcc += dt * ui.speed;
+  const h = 0.01; let steps = 0;
+  while (simAcc >= h && steps < 4000) {
+    plant.step(h); simAcc -= h; steps++;
+    ui.minV = Math.min(ui.minV, plant.elec.V);
+    if (plant.events.length) {
+      for (const ev of plant.events) audio.oneShot(ev.type, evPos(ev.src), ev.gain);
+      plant.events.length = 0;
+    }
+  }
+  ui.minVT += dt; if (ui.minVT > 10) { ui.minVT = 0; ui.minV = plant.elec.V; }
+  // trend sampling (every 5 s sim)
+  if (plant.clock - ui.trendT >= 5) {
+    ui.trendT = plant.clock;
+    ui.trend.push({ t: plant.clock, lwt: C2F(plant.lwtSensor), ewt: C2F(plant.ewtSensor), sp: C2F(plant.ctl.setpoint), cap: plant.ctl.capacityPct, sstA: C2F(plant.A.Tsuc) });
+    if (ui.trend.length > 800) ui.trend.shift();
+  }
+  updatePlayer(dt);
+  updateVisuals(dt, now / 1000);
+  audio.update(plant, camera, ui);
+  ui.navT += dt; ui.navRot += dt / 3; if (ui.navFlash > 0) ui.navFlash -= dt;
+  if (ui.navT > 60 && ui.navPage >= 0) { ui.navPage = -1; }
+  ui.screenT += dt;
+  if (ui.screenT > 0.2) { ui.screenT = 0; drawNav(); drawBAS(); drawVFD(); drawMeter(); drawLeak(); }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__plant = plant; window.__ui = ui; window.__player = player; window.__scene = scene; window.__renderer = renderer; window.__anim = anim; window.__camera = camera; window.__RC = THREE.Raycaster;
+
+</script>
+</body>
+</html>
