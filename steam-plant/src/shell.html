@@ -1,0 +1,270 @@
+<title>Steam Plant Operator</title>
+<meta name="description" content="Operate a physically simulated 36 MW gas-fired drum boiler and steam turbine unit in 3D.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: full-bleed 3D plant, a DCS console docked right, an annunciator bottom-left, vitals across the top.
+   A deliberately single dark look modelled on a high-performance control-room HMI: grey surfaces, colour only for state. */
+:root{
+  color-scheme: dark;
+  --bg:#0d1013; --panel:rgba(19,23,27,.93); --panel-2:#1a1f24; --panel-3:#232a31; --line:#2e373f;
+  --fg:#d9e0e6; --fg-dim:#8a96a0; --accent:#5ab8ff;
+  --run:#ff4a3d; --stop:#3ec46d; --warn:#f3b23a; --alarm:#ff4d3d; --flame:#ff9a3c; --ok:#e9f4ff;
+  --display:"Barlow Condensed","Arial Narrow",Arial,sans-serif;
+  --body:"Barlow",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  --dcs-w:min(520px,42vw);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);font:14px/1.35 var(--body)}
+canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none}
+#labels{position:fixed;inset:0;pointer-events:none}
+.tag{font:600 11px/1 var(--display);letter-spacing:.12em;color:#fff;background:rgba(12,15,18,.62);border:1px solid rgba(255,255,255,.18);padding:3px 6px;border-radius:2px;white-space:nowrap}
+button{font:inherit;color:inherit}
+.btn{appearance:none;background:var(--panel-3);border:1px solid var(--line);border-radius:3px;padding:5px 9px;cursor:pointer;font:600 12px/1.1 var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--fg);white-space:nowrap}
+.btn:hover{border-color:#4a5661;background:#2a323a}
+.btn:focus-visible,.tab:focus-visible,.scard:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn.on{background:#21415e;border-color:var(--accent);color:#fff}
+.btn.sm{padding:3px 7px;font-size:11px}
+.btn.wide{width:100%;text-align:left}
+.btn.danger{border-color:#7a2a26;color:#ffb3ad}
+.btn.danger.on{background:#5a1d1a;color:#fff;border-color:var(--alarm)}
+.btn.go{border-color:#2f6a46}
+
+/* top bar */
+#topbar{position:fixed;left:0;right:0;top:0;padding:6px 10px;padding-top:calc(6px + env(safe-area-inset-top,0px));display:flex;gap:10px;align-items:center;background:linear-gradient(var(--panel),rgba(19,23,27,.82));border-bottom:1px solid var(--line);z-index:5;overflow-x:auto;scrollbar-width:none}
+#topbar::-webkit-scrollbar{display:none}
+.brand{display:flex;flex-direction:column;line-height:1;min-width:max-content}
+.brand b{font:700 17px/1 var(--display);letter-spacing:.08em;text-transform:uppercase}
+.brand small{font:500 11px/1.2 var(--display);letter-spacing:.14em;color:var(--fg-dim);text-transform:uppercase;margin-top:3px}
+#vitals{display:flex;gap:2px;flex:1;min-width:max-content}
+.vit{display:flex;flex-direction:column;padding:2px 8px;border-left:1px solid var(--line);min-width:64px}
+.vit .k{font:600 10px/1 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--fg-dim)}
+.vit .vv{font:600 15px/1.25 var(--mono);font-variant-numeric:tabular-nums}
+.vit small{font-size:10px;color:var(--fg-dim);margin-left:3px}
+.vit.warn .vv{color:var(--warn)} .vit.bad .vv{color:var(--alarm);animation:blink 1s steps(2) infinite} .vit.ok .vv{color:#fff}
+.tools{display:flex;gap:4px;align-items:center;min-width:max-content}
+#clock{font:600 14px var(--mono);padding:0 6px;color:var(--fg-dim);font-variant-numeric:tabular-nums}
+.sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+
+/* DCS console */
+#dcs{position:fixed;right:0;top:56px;bottom:0;width:var(--dcs-w);background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;z-index:4;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+body.nopanel #dcs{display:none}
+.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.tab{appearance:none;border:0;background:transparent;padding:8px 10px;cursor:pointer;font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;color:var(--fg-dim);border-bottom:2px solid transparent}
+.tab.on{color:#fff;border-bottom-color:var(--accent)}
+.acount{color:var(--alarm);font-family:var(--mono)}
+.pages{flex:1;overflow-y:auto;padding:10px 12px 40px;scrollbar-width:thin}
+.page section{border-bottom:1px solid var(--line);padding:6px 0 12px}
+.page h3,#dcs h3{font:600 13px/1 var(--display);letter-spacing:.16em;text-transform:uppercase;color:var(--fg-dim);margin:8px 0 8px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13px;margin:6px 0}
+.kv>span:nth-child(odd){color:var(--fg-dim)}
+.kv>span:nth-child(even){font:13px var(--mono);font-variant-numeric:tabular-nums;text-align:right;min-width:0;overflow-wrap:anywhere}
+.kv4{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:2px 10px;font-size:12px}
+.kv4>span:nth-child(odd){color:var(--fg-dim)} .kv4>span:nth-child(even){font-family:var(--mono);text-align:right}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:6px 0}
+.row .sp{flex:1}
+.lbl{font:600 11px var(--display);letter-spacing:.12em;text-transform:uppercase;color:var(--fg-dim);min-width:64px}
+.num{font:13px var(--mono);font-variant-numeric:tabular-nums}
+.num.big{font-size:18px} .num.huge{font-size:22px;font-weight:600;color:#fff;display:block}
+.w4{min-width:52px;text-align:right}
+.hint{color:var(--fg-dim);font-size:12px;margin:6px 0;max-width:62ch}
+.pill{display:inline-block;padding:3px 8px;border:1px solid var(--line);border-radius:3px;font:600 12px var(--mono);background:var(--panel-3)}
+.trip{color:var(--warn);font-size:12px;margin-left:8px}
+.bmsstate{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 8px}
+.bar{position:relative;display:inline-block;flex:1;min-width:80px;height:10px;background:#0e1215;border:1px solid var(--line);border-radius:2px;overflow:hidden;vertical-align:middle}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#3c6b8f,var(--accent));width:0;transition:width .15s linear}
+.bar b{position:absolute;top:-1px;bottom:-1px;width:2px;background:#fff;left:0}
+.bar.health i{background:linear-gradient(90deg,#9a3a2a,#4caf72)}
+.led{display:inline-block;width:11px;height:11px;border-radius:50%;background:#1d4a2b;box-shadow:inset 0 0 0 1px rgba(0,0,0,.5);vertical-align:middle}
+.led.off{background:#1f5233;box-shadow:0 0 4px rgba(62,196,109,.35)}
+.led.run{background:var(--run);box-shadow:0 0 8px var(--run)}
+.led.ok{background:var(--ok);box-shadow:0 0 6px rgba(233,244,255,.6)}
+.led.flame{background:var(--flame);box-shadow:0 0 10px var(--flame)}
+.led.alarm{background:var(--warn);box-shadow:0 0 10px var(--warn);animation:blink .8s steps(2) infinite}
+.ledl{font-size:12px;color:var(--fg-dim);margin:0 6px 0 4px}
+.perm{list-style:none;padding:0;margin:6px 0;display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;font-size:12px}
+.perm li{display:flex;gap:6px;align-items:center}
+.perm .led.off{background:#3a2420;box-shadow:none}
+.seq{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.vctl{background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:6px 8px;margin:6px 0}
+.vname{font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+.vrow{display:flex;gap:8px;align-items:center}
+.vbtns{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+.fp{background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:6px 8px;margin:8px 0}
+.fph{display:flex;gap:4px;align-items:center;font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+.fph span{flex:1}
+.fpg{display:flex;gap:6px;align-items:center;margin:3px 0}
+.fpg .lbl{min-width:46px}
+.fpg .u{color:var(--fg-dim);font-size:11px;margin-right:auto}
+.fpb{display:flex;gap:3px;justify-content:flex-end}
+.pump{background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:6px 8px;margin:6px 0}
+.ph{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.ph b{flex:1;font:600 13px var(--display);letter-spacing:.06em}
+.big3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}
+.big3>div{background:var(--panel-2);border:1px solid var(--line);padding:6px 8px;border-radius:3px}
+.big3 small{color:var(--fg-dim);font-size:11px}
+.syncwrap{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
+#syncscope{width:170px;height:170px;flex:none}
+.synckv{flex:1;min-width:200px}
+.mimic{width:100%;height:auto;display:block;background:#11161a;border:1px solid var(--line);border-radius:3px}
+.mimic .eq{fill:#1c242b;stroke:#6f7d88;stroke-width:1.5}
+.mimic .eq.run{stroke:#c9d4dc;fill:#232d35}
+.mimic .eq.trip{stroke:var(--warn)}
+.mimic .eq.alarm{stroke:var(--alarm);fill:#3a1714}
+.mimic .ml{fill:#9aa6b0;font:600 11px var(--display);letter-spacing:.1em;text-anchor:middle}
+.mimic .mv{fill:#e9eff4;font:11px var(--mono)}
+.mimic .c{text-anchor:middle} .mimic .sm{font-size:10px}
+.mimic .fl{fill:none;stroke:#3a464f;stroke-width:3}
+.mimic .fl.on{stroke:#8fb7d6;stroke-dasharray:6 4;animation:flow 1s linear infinite}
+.mimic .el{fill:none;stroke:#3a464f;stroke-width:2} .mimic .el.on{stroke:#e9eff4}
+.mimic .brk{fill:#1f5233;stroke:#3ec46d} .mimic .brk.on{fill:#7a1f1a;stroke:var(--run)}
+.mimic .shaft{stroke:#8a96a0;stroke-width:4}
+.mimic .flue{fill:none;stroke:#4a4440;stroke-width:6}
+.mimic .wat{fill:#24557a} .mimic .wat.alarm{fill:#7a2a24}
+.mimic .flame{fill:transparent} .mimic .flame.on{fill:var(--flame);opacity:.85;animation:flick .2s infinite alternate} .mimic .flame.pilot{fill:#5ab8ff;opacity:.6}
+.mimic .hot{cursor:pointer}
+@keyframes flow{to{stroke-dashoffset:-10}}
+@keyframes flick{to{opacity:.6}}
+@keyframes blink{50%{opacity:.25}}
+.ovgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.ovgrid section:last-child{grid-column:1/-1}
+.health{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px;align-items:center}
+.log .pre,.pre{white-space:pre-wrap;font:11px/1.45 var(--mono);color:var(--fg-dim);display:block;margin-top:8px}
+.alist .al{display:grid;grid-template-columns:64px 26px 1fr 40px;gap:6px;font:12px var(--mono);padding:4px 6px;border-bottom:1px solid var(--line)}
+.al.p1{color:#ffb3ad} .al.p2{color:#ffd99a} .al.p3{color:#cfe6ff}
+.al.unack{background:rgba(255,77,61,.08);animation:blink 1s steps(2) infinite}
+.al.rtn{opacity:.55}
+.elog .ev{font:11px/1.5 var(--mono);color:var(--fg-dim);display:flex;gap:10px}
+.elog .ev.warn{color:var(--warn)} .elog .ev.trip{color:#ff8a80}
+.proc{padding-left:22px;margin:8px 0}
+.proc li{padding:6px 4px;border-bottom:1px solid var(--line);color:var(--fg-dim);font-size:13px}
+.proc li.done{color:#7bd88f}
+.proc li.done::marker{content:"✓  "}
+.proc li.next{color:#fff;background:rgba(90,184,255,.08)}
+.faults{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}
+.sl{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--fg-dim);margin:6px 0}
+.sl input{flex:1}
+#trend{width:100%;height:auto;background:#11161a;border:1px solid var(--line);border-radius:3px;display:block;margin-top:6px}
+.legend{display:flex;flex-direction:column;gap:3px;margin-top:6px;font-size:12px}
+.legend i{display:inline-block;width:12px;height:3px;margin-right:6px;vertical-align:middle}
+.legend em{color:var(--fg-dim);font-style:normal;font-size:11px;margin-left:6px}
+
+/* annunciator */
+#annunc{position:fixed;left:10px;bottom:10px;padding:6px;padding-bottom:calc(6px + env(safe-area-inset-bottom,0px));background:var(--panel);border:1px solid var(--line);border-radius:4px;z-index:4;max-width:calc(100vw - var(--dcs-w) - 30px)}
+body.nopanel #annunc{max-width:calc(100vw - 20px)}
+.anngrid{display:grid;grid-template-columns:repeat(6,72px);gap:3px}
+.win{height:34px;display:flex;align-items:center;justify-content:center;text-align:center;font:600 9.5px/1.05 var(--display);letter-spacing:.06em;color:#4b5660;background:#15191d;border:1px solid #262d33;border-radius:2px}
+.win.ring{background:#b3261e;color:#fff;animation:blink .5s steps(2) infinite;box-shadow:0 0 12px rgba(255,77,61,.6)}
+.win.act{background:#7d1c16;color:#ffd8d4}
+.win.clr{background:#3b3420;color:#f3d38a;animation:blink 1.4s steps(2) infinite}
+.annb{display:flex;gap:4px;margin-top:5px}
+.annb .btn{flex:1}
+
+/* tooltip, toasts, overlays */
+#tip{position:fixed;z-index:8;pointer-events:none;background:rgba(14,17,20,.94);border:1px solid var(--line);border-left:3px solid var(--accent);padding:8px 10px;min-width:200px;max-width:260px;font-size:12px;border-radius:3px}
+#tip b{display:block;font:600 13px var(--display);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+#tip div{display:flex;justify-content:space-between;gap:10px} #tip div span:last-child{font-family:var(--mono)}
+#tip em{display:block;color:var(--fg-dim);font-style:normal;font-size:11px;margin-top:6px}
+#toasts{position:fixed;top:70px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:6px;z-index:9;pointer-events:none;width:min(520px,calc(100vw - 32px))}
+body:not(.nopanel) #toasts{left:calc((100vw - var(--dcs-w)) / 2)}
+.toast{background:rgba(14,17,20,.94);border:1px solid var(--line);border-left:3px solid var(--fg-dim);padding:7px 11px;font-size:13px;border-radius:3px;transition:opacity .5s,transform .5s}
+.toast.warn{border-left-color:var(--warn)} .toast.trip{border-left-color:var(--alarm);background:rgba(60,14,12,.95)}
+.toast.out{opacity:0;transform:translateY(-6px)}
+.overlay{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;padding:16px;background:radial-gradient(ellipse at center,rgba(10,12,14,.72),rgba(6,8,10,.94));overflow-y:auto}
+.card{max-width:860px;width:100%;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:26px 28px}
+.card h1{font:700 clamp(30px,5vw,52px)/0.95 var(--display);letter-spacing:.04em;text-transform:uppercase;margin:0 0 6px;text-wrap:balance}
+.card h1 span{color:var(--flame)}
+.card .lede{color:var(--fg-dim);max-width:66ch;margin:8px 0 18px}
+.plate{font:500 12px var(--mono);color:var(--fg-dim);display:flex;flex-wrap:wrap;gap:4px 18px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:8px 0;margin-bottom:18px}
+#scen{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.scard{appearance:none;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:12px;cursor:pointer;display:flex;flex-direction:column;gap:6px}
+.scard:hover{border-color:var(--accent);background:#1c2731}
+.scard b{font:700 16px var(--display);letter-spacing:.08em;text-transform:uppercase}
+.scard span{font-size:12px;color:var(--fg-dim)}
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:4px 16px;margin-top:18px;font-size:12px;color:var(--fg-dim)}
+kbd{font:11px var(--mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:3px;padding:1px 5px;color:var(--fg);background:var(--panel-3)}
+#over .card{border-color:#7a2a26}
+#over h1{color:#ff8a80}
+#fatal{position:fixed;inset:auto 16px 16px 16px;z-index:30;background:#3a1714;border:1px solid var(--alarm);padding:12px;border-radius:4px}
+body.walking::after{content:"";position:fixed;left:50%;top:50%;width:6px;height:6px;margin:-3px;border-radius:50%;background:rgba(255,255,255,.8);z-index:6;pointer-events:none}
+
+@media (max-width:860px){
+  :root{--dcs-w:100vw}
+  #dcs{top:auto;height:52vh;border-left:0;border-top:1px solid var(--line)}
+  #annunc{display:none}
+  .anngrid{grid-template-columns:repeat(4,64px)}
+  .ovgrid{grid-template-columns:1fr}
+  body:not(.nopanel) #toasts{left:50%}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<canvas id="gl" tabindex="0" aria-label="3D steam plant"></canvas>
+<div id="labels"></div>
+<header id="topbar">
+  <div class="brand"><b>Unit 1</b><small>36 MW · gas-fired drum boiler</small></div>
+  <div id="vitals"></div>
+  <div class="tools">
+    <span id="clock">00:00:00</span>
+    <button class="btn sm" data-speed="0" title="Pause (P)">❚❚</button>
+    <button class="btn sm on" data-speed="1" title="Real time (1)">1×</button>
+    <button class="btn sm" data-speed="2" title="2× (2)">2×</button>
+    <button class="btn sm" data-speed="5" title="5× (3)">5×</button>
+    <button class="btn sm" data-speed="10" title="10× (4)">10×</button>
+    <button class="btn sm" data-speed="20" title="20× (5)">20×</button>
+    <span class="sep"></span>
+    <button class="btn sm" data-cmd="walk" title="Walk the plant (F)">Walk</button>
+    <button class="btn sm" data-tog="xray" title="See inside the boiler (X)">X-ray</button>
+    <button class="btn sm" data-tog="night" title="Night shift (N)">Night</button>
+    <button class="btn sm on" data-tog="labels" title="Labels (L)">Labels</button>
+    <button class="btn sm on" data-tog="roof" title="Hall roof (R)">Roof</button>
+    <button class="btn sm" data-tog="sound" title="Sound (M)">Sound</button>
+    <button class="btn sm" data-cmd="panel" title="Console (Tab)">Console</button>
+    <button class="btn sm" data-cmd="help" title="Help">?</button>
+  </div>
+</header>
+<aside id="dcs" aria-label="Distributed control system console"></aside>
+<div id="annunc" aria-label="Annunciator"></div>
+<div id="tip" hidden></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="fatal" hidden></div>
+
+<div id="start" class="overlay">
+  <div class="card">
+    <h1>Steam Plant <span>Operator</span></h1>
+    <p class="lede">You are the control-room operator of Unit 1. The plant runs on real thermodynamics: IAPWS-IF97 steam tables, drum dynamics with shrink and swell, combustion with excess air, a Rankine cycle turbine and a generator swinging against the grid. Run it well and it makes money. Ignore the interlocks and it will hurt you.</p>
+    <div class="plate"><span>BOILER 36 kg/s · 9.4 MPa drum · 510 °C</span><span>TURBINE 3600 rpm condensing</span><span>GENERATOR 45 MVA · 13.8 kV · 60 Hz</span><span>FUEL natural gas</span></div>
+    <div id="scen"></div>
+    <div class="keys">
+      <span><kbd>Drag</kbd> orbit · <kbd>Wheel</kbd> zoom</span>
+      <span><kbd>Click</kbd> equipment for controls</span>
+      <span><kbd>F</kbd> walk · <kbd>WASD</kbd> <kbd>Q</kbd>/<kbd>E</kbd></span>
+      <span><kbd>X</kbd> x-ray boiler · <kbd>N</kbd> night</span>
+      <span><kbd>Tab</kbd> console · <kbd>P</kbd> pause</span>
+      <span><kbd>1</kbd>–<kbd>5</kbd> time 1× to 20×</span>
+    </div>
+  </div>
+</div>
+
+<div id="help" class="overlay" hidden>
+  <div class="card">
+    <h1>Operator <span>notes</span></h1>
+    <p class="lede">Lamp colours follow North American power-plant practice. <b>Red</b> means running, energized or closed (breakers). <b>Green</b> means stopped or open. <b>Amber</b> means tripped or in alarm.</p>
+    <p class="lede">The burner management system enforces the NFPA 85 sequence: purge, then pilot, then main flame. A flame lost for 3 s trips the master fuel valve. Natural gas that collects in a hot furnace will find an ignition source.</p>
+    <p class="lede">When firing rises, the drum level first <b>swells</b> as bubbles grow under the surface, then falls as water boils away. Three-element control (level, steam flow and feed flow) handles this above about 25 % load. Trust the gauge glass over a transmitter.</p>
+    <p class="lede">Before rolling the turbine, open the drains to warm the main steam line. Condensate slugs cause water hammer. Pass quickly through the critical speeds and keep vacuum below 10 kPa abs. To synchronize, match frequency, voltage and phase, then close at 12 o'clock.</p>
+    <button class="btn" data-close>Close</button>
+  </div>
+</div>
+
+<div id="over" class="overlay" hidden>
+  <div class="card">
+    <h1 id="overTitle">Plant destroyed</h1>
+    <p class="lede" id="overText"></p>
+    <p class="plate" id="overTime"></p>
+    <div class="row"><button class="btn" id="overRestart">Restart scenario</button><button class="btn" id="overMenu">Choose scenario</button></div>
+  </div>
+</div>
